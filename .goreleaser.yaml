@@ -1,0 +1,36 @@
+builds:
+  - ldflags:
+      - -s -w -extldflags "-static" -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}} -X main.builtBy=goreleaser
+    tags:
+      - osusergo
+      - netgo
+      - static
+    env:
+      - CGO_ENABLED=0
+    # targets:
+    #   - linux_amd64_v4
+    goos:
+      - linux
+    goarch:
+      - amd64
+    goamd64:
+      - v4
+    # hooks:
+    # post: upx --ultra-brute "{{ .Path }}" && upx -vt "{{ .Path }}"
+
+dockers:
+  - goos: linux # GOOS of the built binaries/packages that should be used.
+    # GOARCH of the built binaries/packages that should be used.
+    goarch: amd64
+    # GOAMD64 of the built binaries/packages that should be used.
+    goamd64: "v4"
+    # Templates of the Docker image names.
+    extra_files:
+      - go.mod
+      - go.sum
+      - secinfo.go
+      - streamers
+    image_templates:
+      - "ghcr.io/goproslowyo/secinfo:{{ .Tag }}"
+      - "ghcr.io/goproslowyo/secinfo:latest"
+    # skip_push: "true"
