@@ -16,13 +16,12 @@ var (
 )
 
 func init() {
-	filename := "streamers.csv"
-	filename2 := "index.md"
-	afero.WriteFile(AFS, filename,
-		[]byte("fakeus3r,\n0reoByte,\n0xBufu,\n0xCardinal,\n0xChance,\n0xj3lly,\n0xRy4nG,https://www.youtube.com/channel/UCQWQlNq07_Rumy2i69dpqBw\nantisyphon,https://www.youtube.com/channel/UCkFKiCm7dD0gsB4jqIdCuRQ\nSecurity_Live,https://www.youtube.com/channel/UCMDy1HAPNcpl8zVTK1NfMqw"), 0644)
-	afero.WriteFile(AFS, filename2,
+	afero.WriteFile(AFS, "streamers.csv",
+		[]byte("fakeus3r,\n0reoByte,\n \n0xBufu,\n0xCardinal,\n0xChance,\n0xj3lly,\n0xRy4nG,https://www.youtube.com/channel/UCQWQlNq07_Rumy2i69dpqBw\nantisyphon,https://www.youtube.com/channel/UCkFKiCm7dD0gsB4jqIdCuRQ\nSecurity_Live,https://www.youtube.com/channel/UCMDy1HAPNcpl8zVTK1NfMqw"), 0644)
+	afero.WriteFile(AFS, "index.md",
 		[]byte("---: | --- | :--- | :---\n🟢 | `Security_Live` | [<i class=\"fab fa-twitch\" style=\"color:#9146FF\"></i>](https://www.twitch.tv/Security_Live) &nbsp; [<i class=\"fab a-youtube\" style=\"color:#C00\"></i>](https://www.youtube.com/channel/UCMDy1HAPNcpl8zVTK1NfMqw) |\n&nbsp; | `S4vitaar` | [<i class=\"fab fa-twitch\" style=\"color:#9146FF\"></i>](https://www.twitch.tv/S4vitaar) &nbsp; [<i class=\"fab fa-youtube\" style=\"color:#C00\"></i>](https://www.youtube.com/channel/UCNHWpNqiM8yOQcHXtsluD7Q)\n🟢 | `jbeers11` | [<i class=\"fab fa-twitch\" style=\"color:#9146FF\"></i>](https://www.twitch.tv/jbeers11) |\n&nbsp; | `SecurityWeekly` | [<i class=\"fab fa-twitch\" style=\"color:#9146FF\"></i>](https://www.twitch.tv/SecurityWeekly) &nbsp; [<i class=\"fab fa-youtube\" style=\"color:#C00\"></i>](https://www.youtube.com/channel/UCg--XBjJ50a9tUhTKXVPiqg)\n"), 0644)
-	afero.WriteFile(AFS, "streamers2.csv", []byte("test\ntest\ttestset\nzest\ttest"), 0644)
+	afero.WriteFile(AFS, "streamers2.csv", []byte(""), 0644)
+	afero.WriteFile(AFS, "not_a_csv.csv", []byte("text\ntext2"), 0644)
 }
 
 func TestParseStreamersPass(t *testing.T) {
@@ -31,7 +30,7 @@ func TestParseStreamersPass(t *testing.T) {
 	// Parse the streamers.csv file
 	sl, err := streamers.ParseStreamers(f)
 	if err != nil {
-		t.Errorf("Error: %s", err)
+		t.Fatalf("Error: %s", err)
 	}
 
 	// Test if values in sl are equal to bytes written to streamers.csv
@@ -51,21 +50,24 @@ func TestParseStreamersPass(t *testing.T) {
 }
 
 func TestParseStreamersFail(t *testing.T) {
-	// if e, err := AFS.Exists("doesnt_exist.csv"); err == nil {
-	// 	d, err := AFS.ReadDir("/")
-	// 	if err != nil {
-	// 		t.Errorf("%s", err)
-	// 	}
-	// 	fmt.Printf("Directory info: %+v\n", d)
-	// 	t.Errorf("File doesn't exist: %t", e)
-	// }
+	if e, err := AFS.Exists("doesnt_exist.csv"); err == nil {
+		t.Logf("File doesn't exist: %t", e)
+	}
+	d, err := AFS.ReadDir("/")
+	if err != nil {
+		t.Errorf("%s", err)
+	}
+	for _, f := range d {
+		fmt.Println(f.Mode(), f.ModTime(), f.Size(), f.IsDir(), f.Name())
+	}
+
 	f, _ := AFS.Open("streamers2.csv")
 	s, err := f.Stat()
 	if err != nil {
-		t.Errorf("HALGALGLADLGASLDGL %s", err)
+		t.Errorf("%s", err)
 	}
 	if s.Size() == 0 {
-		t.Errorf("File is empty")
+		t.Logf("File is empty")
 	}
 
 	// Parse the streamers.csv file
@@ -76,6 +78,26 @@ func TestParseStreamersFail(t *testing.T) {
 	if sl.Len() != 0 {
 		t.Errorf("Got: %d, Wanted: %d", sl.Len(), 0)
 	}
+
+	f, _ = AFS.Open("not_a_csv.csv")
+	s, err = f.Stat()
+	if err != nil {
+		t.Errorf("%s", err)
+	}
+	if s.Size() == 0 {
+		t.Logf("File is empty, as expected: %d", s.Size())
+	}
+
+	// Parse the streamers.csv file
+	sl, err = streamers.ParseStreamers(f)
+	if err == nil {
+		t.Fatal("Error: test expected to fail!")
+	}
+	if err.Error() != "file is not a CSV file: Text: text\ntext2" {
+		t.Errorf("Got: %s, Wanted: %s", err, "file is not a CSV file: Text: text\ntext2")
+	}
+	t.Logf("Received error as expected: %s", err)
+	sl = streamers.StreamerList{Streamers: []streamers.Streamer{}}
 }
 
 func TestSort(t *testing.T) {
@@ -105,7 +127,7 @@ func TestSullyGnomeStats(t *testing.T) {
 }
 
 func TestOpenCSVPass(t *testing.T) {
-	f, err := streamers.OpenCSV("/home/gpsy/repos/secinfo/secinfo/streamers.csv")
+	f, err := AFS.Open("streamers.csv")
 	if err != nil {
 		t.Errorf("%s", err)
 	}
@@ -176,7 +198,7 @@ func TestGetStats(t *testing.T) {
 	}
 }
 
-func TestReturnLine(t *testing.T) {
+func TestReturnMarkdownLine(t *testing.T) {
 	f, _ := AFS.Open("streamers.csv")
 
 	// Parse the streamers.csv file
@@ -189,11 +211,11 @@ func TestReturnLine(t *testing.T) {
 		s.GetStats()
 		if s.YTURL != "" && s.Name == "0xRy4nG" {
 			s.ThirtyDayStats = 20
-			s.ReturnLine(true)
-			s.ReturnLine(false)
+			s.ReturnMarkdownLine(true)
+			s.ReturnMarkdownLine(false)
 		}
-		s.ReturnLine(true)
-		s.ReturnLine(false)
+		s.ReturnMarkdownLine(true)
+		s.ReturnMarkdownLine(false)
 		fmt.Printf("Object: %+v", s)
 	}
 }

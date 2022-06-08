@@ -1,7 +1,8 @@
+/* Package streamers extracts 30-day streaming statistics and generates sorted markdown. */
+// BUG(🐛): there are bugs in here.
 package streamers
 
 import (
-	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,33 +16,42 @@ import (
 	"github.com/spf13/afero"
 )
 
+// Streamer is a struct that contains the name of a streamer and the YouTube channel url.
+// SullyGnomeID and ThirtyDayStats are fetched from SullyGnome.com.
+// (sorry for lightly gathering a small amount of info every 24 hours).
 type Streamer struct {
-	Name           string
-	YTURL          string
-	SullyGnomeID   string
-	ThirtyDayStats float32
+	Name           string  // The name of the streamer
+	YTURL          string  // The url of the streamer's YouTube channel
+	SullyGnomeID   string  // The SullyGnome ID of the streamer
+	ThirtyDayStats float32 // Hours streamed in the last 30 days
 }
 
+// StreamList is uhh... a list of Streamers.
 type StreamerList struct {
-	Streamers []Streamer
+	Streamers []Streamer // List of Streamers
 }
 
+// Len returns the length of the StreamerList, used to implement sort.Interface.
 func (sl StreamerList) Len() int {
 	return len(sl.Streamers)
 }
 
+// Less returns a bool for i > j, used to implment sort.Interface.
 func (sl StreamerList) Less(i, j int) bool {
 	return sl.Streamers[i].ThirtyDayStats > sl.Streamers[j].ThirtyDayStats
 }
 
+// Swap swaps the elements at i and j in the StreamerList, used to implement sort.Interface.
 func (sl StreamerList) Swap(i, j int) {
 	sl.Streamers[i], sl.Streamers[j] = sl.Streamers[j], sl.Streamers[i]
 }
 
+// Implement sort, after implementing the Len, Less, and Swap functions to satisfy the sort.Interface.
 func (sl *StreamerList) Sort() {
 	sort.Sort(sl)
 }
 
+// SullyGnomeStats is a struct to deserialize the 30-day streaming statistics json response.
 type SullyGnomeStats struct {
 	Data struct {
 		Datasets []struct {
@@ -50,6 +60,7 @@ type SullyGnomeStats struct {
 	} `json:"data"`
 }
 
+// GetUID populates the Streamer struct's SullyGnomeID field.
 func (s *Streamer) GetUID() {
 	// Make a net/http get request to get the UID
 	// The URL is f'https://sullygnome.com/channel/%s/30/activitystats'
@@ -104,6 +115,7 @@ func (s *Streamer) GetUID() {
 	s.SullyGnomeID = id
 }
 
+// GetStats populates the Streamer struct's ThirtyDayStats field with 30-day streaming statistics.
 func (s *Streamer) GetStats() {
 	// Check that the streamer has a SullyGnomeID and not an empty string
 	if s.SullyGnomeID == "" {
@@ -146,6 +158,7 @@ func (s *Streamer) GetStats() {
 	s.ThirtyDayStats = sum
 }
 
+// OnlineNow returns a bool whether the streamer is online(🟢) or not in "index.md".
 func (s Streamer) OnlineNow(indexText string) bool {
 	// Read index.md and search for the streamer's name to see if the line contains "🟢"
 	for _, line := range strings.Split(indexText, "\n") {
@@ -158,7 +171,10 @@ func (s Streamer) OnlineNow(indexText string) bool {
 	return false
 }
 
-func (s Streamer) ReturnLine(online bool) (string, error) {
+// ReturnMarkdownLine returns a GitHub markdown-flavored line for 'index.md' or 'inactive.md'.
+// If the stream has > 0 hours over 30 days, it will return a line that contains columns for the 🟢 and Twitch/YouTube links.
+// Otherwise if will return a line that just contains the streamer + links for inactive.md.
+func (s Streamer) ReturnMarkdownLine(online bool) (string, error) {
 	var line string
 	if s.ThirtyDayStats > 0 { // active streamer
 		if online { // online
@@ -184,6 +200,7 @@ func (s Streamer) ReturnLine(online bool) (string, error) {
 	return line, nil
 }
 
+// OpenCSV opens the CSV file and returns an Afero file object and/or error.
 func OpenCSV(file string) (afero.File, error) {
 	var AppFs = afero.NewOsFs()
 	f, err := AppFs.Open(file)
@@ -193,59 +210,39 @@ func OpenCSV(file string) (afero.File, error) {
 	return f, err
 }
 
+// ParseStreamers takes an Afero file object and returns a StreamerList populated with Streamer objects.
 func ParseStreamers(f afero.File) (StreamerList, error) {
 	// Test if the file exists and is not a directory
 	i, _ := f.Stat()
 
+	var sl StreamerList
 	// Check if the file is a non-empty regular file
 	if !i.IsDir() && i.Size() > 0 {
 		// Read the file
 		b, err := ioutil.ReadAll(f)
 		if err != nil {
-			return StreamerList{}, err
+			return sl, err
 		}
 		// Check the file to see if they are a CSV file
 		for _, line := range strings.Split(string(b), "\n") {
+			// Trim the line
+			line = strings.TrimSpace(line)
 			// Skip empty lines
 			if line == "" {
 				continue
 			}
 			if !strings.Contains(line, ",") {
-				return StreamerList{}, fmt.Errorf("file is not a CSV file: Text: %s", b)
+				return sl, fmt.Errorf("file is not a CSV file: Text: %s", b)
 			}
-			fmt.Printf("Line: %s\n", line)
+			parts := strings.Split(line, ",")
+			// Append the streamer to the list
+			sl.Streamers = append(sl.Streamers, Streamer{
+				Name:  parts[0],
+				YTURL: parts[1],
+			})
 		}
 	} else {
-		return StreamerList{}, errors.New("file is not a file or is empty")
-	}
-
-	// Open the file and parse the CSV
-	c := csv.NewReader(f)
-	r, err := c.ReadAll()
-	if len(r) == 0 {
-		return StreamerList{}, errors.New("file is empty")
-	}
-	if err != nil || len(r) == 0 {
-		return StreamerList{}, err
-	}
-	// Create a slice of StreamerList
-	var sl StreamerList
-	// Print len of r
-	fmt.Printf("Len: %d\n", len(r))
-	// Fatally end program execution here
-	log.Fatalf("%+v", r)
-
-	for i, row := range r {
-		// Announce we're here!
-		fmt.Printf("Parsing: %s\n", row[i])
-		// Skip empty lines
-		if row[i] == "" {
-			continue
-		}
-		sl.Streamers = append(sl.Streamers, Streamer{
-			Name:  row[0],
-			YTURL: row[1],
-		})
+		return sl, errors.New("file is not a file or is empty")
 	}
 	return sl, nil
 }

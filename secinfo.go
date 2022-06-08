@@ -70,13 +70,13 @@ func main() {
 
 	// Read index.tmpl.md into a string
 	indexMdTemplate, _ := ioutil.ReadFile("templates/index.tmpl.md")
-	// Find  '---: | --- | :--- | :---' and append each streamer in streamerist using ReturnLine()
+	// Find  '---: | --- | :--- | :---' and append each streamer in streamerist using ReturnMarkdownLine()
 	heading := "---: | --- | :--- | :---\n"
 	i := strings.Index(string(indexMdTemplate), heading) + len(heading)
 	// Print line from the i indexMD
 	newMd := string(indexMdTemplate[:i])
 	for _, streamer := range active.Streamers {
-		s, err := streamer.ReturnLine(streamer.OnlineNow(indexStr))
+		s, err := streamer.ReturnMarkdownLine(streamer.OnlineNow(indexStr))
 		if err != nil {
 			fmt.Println(err)
 		}
@@ -84,25 +84,26 @@ func main() {
 	}
 	newMd += string(indexMdTemplate[i:])
 	// Write index.md
-	ioutil.WriteFile("../index.md", []byte(newMd), 0644)
+	ioutil.WriteFile("./index.md", []byte(newMd), 0644)
 
 	// Clear markdown string
 	newMd = ""
 	// Read inactive.tmpl.md into a string
 	inactiveMD, _ := ioutil.ReadFile("templates/inactive.tmpl.md")
-	// Fine '--: | --- | :--- | :---' and append each streamer in inactive using ReturnLine()
+	// Fine '--: | --- | :--- | :---' and append each streamer in inactive using ReturnMarkdownLine()
 	heading = "--: | ---\n"
 	i = strings.Index(string(inactiveMD), heading) + len(heading)
-	// Print line from the i indexMD
+	// Print line to the i indexMD
 	newMd = string(inactiveMD[:i])
 	for _, streamer := range inactive.Streamers {
-		s, err := streamer.ReturnLine(false) // Sorry inactive can't be online
+		s, err := streamer.ReturnMarkdownLine(false) // Sorry inactive can't be online
 		if err != nil {
 			fmt.Println(err)
 		}
 		newMd += s
 	}
+	// Print line from the i indexMD
 	newMd += string(inactiveMD[i:])
 	// Write inactive.md
-	ioutil.WriteFile("../inactive.md", []byte(newMd), 0644)
+	ioutil.WriteFile("./inactive.md", []byte(newMd), 0644)
 }
