@@ -1,6 +1,9 @@
 # Binaries for programs and plugins
 secinfo
 
+# Gorelease binaries
+dist/
+
 # Test binary, built with `go test -c`
 *.test
 

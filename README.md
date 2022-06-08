@@ -12,6 +12,25 @@ Check the `Makefile` for all options but you've got `make {docs,test,cover,clean
 
 When running `docker-run`, we assume you're providing `streamers.csv` from the infosecstreams repo. You can check the invocation of the `docker run ...` command in the Makefile for further details.
 
+### Test Mode
+
+When developing, you'll likely not want to actually hit the API and use the internet. Instead you can reference static json files.
+
+If the `SECINFO_TEST` environment variable is set (to literally any non-empty string), we'll use the test files instead of hitting the API.
+
+```go
+// Check environ SECINFO_TEST exists
+if os.Getenv("SECINFO_TEST") == "" { ... }
+else {
+  // Read active.json into active struct
+  f, _ := ioutil.ReadFile("active.json")
+  _ = json.Unmarshal([]byte(f), &active)
+  // Read inactive.json into inactive struct
+  f, _ = ioutil.ReadFile("inactive.json")
+  _ = json.Unmarshal([]byte(f), &inactive)
+}
+```
+
 ## Usage
 
 Ensure there's a `streamers.csv` in the CWD of the secinfo binary.

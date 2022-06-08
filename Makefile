@@ -12,13 +12,17 @@ cover: test
 clean:
 	rm -rf coverage.out coverage.html
 	rm -rf secinfo secinfo.test
+	rm -rf dist
 
 build:
-	rm secinfo
-	CGO_ENABLED=0 go build -v -tags 'osusergo,netgo,static' -ldflags '-s -w -extldflags "-static"' .
+	@echo ${VERSION}
+	CGO_ENABLED=0 GOAMD64=v4 go build -v -trimpath -tags 'osusergo,netgo,static' -ldflags '-s -w -extldflags "-static"' .
 
 docker-build:
 	docker build -t secinfo:${VERSION} .
+
+release:
+	goreleaser release --snapshot --rm-dist
 
 docker-run:
 	docker run -it -v ${PWD}/templates:/app/templates -v ${PWD}/index.md:/app/index.md -v ${PWD}/streamers.csv:/app/streamers.csv secinfo:${VERSION}
