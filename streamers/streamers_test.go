@@ -210,6 +210,10 @@ func TestReturnMarkdownLine(t *testing.T) {
 		s.GetUID()
 		s.GetStats()
 		if s.YTURL != "" && s.Name == "0xRy4nG" {
+			s.ThirtyDayStats = 0
+			s.ReturnMarkdownLine(true)
+			s.ReturnMarkdownLine(false)
+		} else if s.YTURL != "" && s.Name == "Security_Live" {
 			s.ThirtyDayStats = 20
 			s.ReturnMarkdownLine(true)
 			s.ReturnMarkdownLine(false)
