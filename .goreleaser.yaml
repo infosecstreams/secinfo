@@ -1,4 +1,8 @@
 builds:
+  - skip: true
+  # Instead we build using the docker file and steps below.
+  # I left this here in case there's ever a reason to use it.
+
   # - ldflags:
   #     - -s -w -extldflags "-static" -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}} -X main.builtBy=goreleaser
   #   tags:
@@ -8,17 +12,15 @@ builds:
   #   env:
   #     - CGO_ENABLED=0
   #   # targets:
-  #   #   - linux_amd64_v4
+  #   #   - linux_amd64_v3
   #   goos:
   #     - linux
   #   goarch:
   #     - amd64
   #   goamd64:
-  #     - v4
+  #     - v3
   #   hooks:
   #     post: upx --ultra-brute "{{ .Path }}" && upx -vt "{{ .Path }}"
-
-  - skip: true
 
 dockers:
   - # skip_push: "true"

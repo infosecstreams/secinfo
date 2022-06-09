@@ -17,7 +17,7 @@ clean:
 
 build:
 	@echo ${VERSION}
-	CGO_ENABLED=0 GOAMD64=v4 go build -v -trimpath -tags 'osusergo,netgo,static' -ldflags '-s -w -extldflags "-static"' .
+	CGO_ENABLED=0 GOAMD64=v3 go build -v -trimpath -tags 'osusergo,netgo,static' -ldflags '-s -w -extldflags "-static"' .
 
 docker-build:
 	docker build -t secinfo-dev:${VERSION} .
