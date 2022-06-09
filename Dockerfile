@@ -7,7 +7,7 @@ COPY streamers /build/streamers
 WORKDIR /build
 
 RUN apt update && apt install -y upx
-RUN CGO_ENABLED=0 go build -v -ldflags '-s -w -extldflags "-static"' -tags 'osusergo,netgo,static' -asmflags 'all=-trimpath={{.Env.GOPATH}}' .
+RUN CGO_ENABLED=0 GOAMD64=v4 go build -v -ldflags '-s -w -extldflags "-static"' -tags 'osusergo,netgo,static' -asmflags 'all=-trimpath={{.Env.GOPATH}}' .
 RUN upx --ultra-brute secinfo && upx -t secinfo
 
 FROM scratch

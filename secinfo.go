@@ -65,7 +65,7 @@ func main() {
 
 	// Markdown time!
 	// Read existing index.md into a string
-	indexMd, _ := ioutil.ReadFile("../index.md")
+	indexMd, _ := ioutil.ReadFile("index.md")
 	indexStr := string(indexMd)
 
 	// Read index.tmpl.md into a string
