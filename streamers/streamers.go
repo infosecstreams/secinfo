@@ -24,6 +24,7 @@ type Streamer struct {
 	YTURL          string  // The url of the streamer's YouTube channel
 	SullyGnomeID   string  // The SullyGnome ID of the streamer
 	ThirtyDayStats float32 // Hours streamed in the last 30 days
+	Lang           string  // The streamer's language. If they are online this is used in the generated markdown.
 }
 
 // StreamList is uhh... a list of Streamers.
@@ -159,11 +160,12 @@ func (s *Streamer) GetStats() {
 }
 
 // OnlineNow returns a bool whether the streamer is online(🟢) or not in "index.md".
-func (s Streamer) OnlineNow(indexText string) bool {
+func (s *Streamer) OnlineNow(indexText string) bool {
 	// Read index.md and search for the streamer's name to see if the line contains "🟢"
 	for _, line := range strings.Split(indexText, "\n") {
 		if strings.Contains(line, s.Name) {
 			if strings.Contains(line, "🟢") {
+				s.Lang = line[len(line)-2:]
 				return true
 			}
 		}
@@ -179,9 +181,9 @@ func (s Streamer) ReturnMarkdownLine(online bool) (string, error) {
 	if s.ThirtyDayStats > 0 { // active streamer
 		if online { // online
 			if s.YTURL != "" {
-				line = fmt.Sprintf("🟢 | `%s` | [<i class=\"fab fa-twitch\" style=\"color:#9146FF\"></i>](https://www.twitch.tv/%s) &nbsp; [<i class=\"fab a-youtube\" style=\"color:#C00\"></i>](%s) |\n", s.Name, s.Name, s.YTURL)
+				line = fmt.Sprintf("🟢 | `%s` | [<i class=\"fab fa-twitch\" style=\"color:#9146FF\"></i>](https://www.twitch.tv/%s) &nbsp; [<i class=\"fab fa-youtube\" style=\"color:#C00\"></i>](%s) | %s\n", s.Name, s.Name, s.YTURL, s.Lang)
 			} else {
-				line = fmt.Sprintf("🟢 | `%s` | [<i class=\"fab fa-twitch\" style=\"color:#9146FF\"></i>](https://www.twitch.tv/%s) |\n", s.Name, s.Name)
+				line = fmt.Sprintf("🟢 | `%s` | [<i class=\"fab fa-twitch\" style=\"color:#9146FF\"></i>](https://www.twitch.tv/%s) | %s\n", s.Name, s.Name, s.Lang)
 			}
 		} else { // offline
 			if s.YTURL != "" {
