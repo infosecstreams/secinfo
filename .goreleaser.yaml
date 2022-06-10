@@ -30,5 +30,5 @@ dockers:
       - secinfo.go
       - streamers
     image_templates:
-      - "ghcr.io/goproslowyo/secinfo:{{ .Tag }}"
-      - "ghcr.io/goproslowyo/secinfo:latest"
+      - "ghcr.io/infosecstreams/secinfo:{{ .Tag }}"
+      - "ghcr.io/infosecstreams/secinfo:latest"

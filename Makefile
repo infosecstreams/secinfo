@@ -13,7 +13,7 @@ clean:
 	rm -rf coverage.out coverage.html
 	rm -rf secinfo secinfo.test
 	rm -rf dist
-	docker rmi secinfo-dev:${VERSION} ghcr.io/goproslowyo/secinfo-dev:${VERSION} ghcr.io/goproslowyo/secinfo-dev:latest secinfo-dev:latest
+	docker rmi secinfo-dev:${VERSION} ghcr.io/infosecstreams/secinfo-dev:${VERSION} ghcr.io/infosecstreams/secinfo-dev:latest secinfo-dev:latest
 
 build:
 	@echo ${VERSION}
@@ -29,9 +29,9 @@ docker-run:
 	docker run -it -v ${PWD}/templates:/app/templates -v ${PWD}/index.md:/app/index.md -v ${PWD}/inactive.md:/app/inactive.md -v ${PWD}/streamers.csv:/app/streamers.csv secinfo-dev:${VERSION}
 
 docker-push:
-	docker tag secinfo-dev:${VERSION} ghcr.io/goproslowyo/secinfo-dev:${VERSION}
-	docker tag secinfo-dev:${VERSION} ghcr.io/goproslowyo/secinfo-dev:latest
-	docker push ghcr.io/goproslowyo/secinfo-dev:${VERSION}
-	docker push ghcr.io/goproslowyo/secinfo-dev:latest
+	docker tag secinfo-dev:${VERSION} ghcr.io/infosecstreams/secinfo-dev:${VERSION}
+	docker tag secinfo-dev:${VERSION} ghcr.io/infosecstreams/secinfo-dev:latest
+	docker push ghcr.io/infosecstreams/secinfo-dev:${VERSION}
+	docker push ghcr.io/infosecstreams/secinfo-dev:latest
 
 .PHONY: clean test
