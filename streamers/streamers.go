@@ -98,8 +98,13 @@ func (s *Streamer) GetUID() {
 	// Check if response contains username
 	if !strings.Contains(str_response, s.Name) {
 		log.Printf("streamer hasn't streamed in a while! username not found, check spelling: %s, check twitch: https://www.twitch.tv/%s/schedule, stats: %s\n", s.Name, s.Name, url)
+		return
 	}
 
+	// Parse the body for '<span class="PageHeaderMiddleWithImageHeaderP1">'
+	user_response := strings.Split(str_response, "<span class=\"PageHeaderMiddleWithImageHeaderP1\">")[1]
+	// Remove everything after '</span>'
+	user_response = strings.Split(user_response, "</span>")[0]
 	// Parse the body for 'var PageInfo = '
 	str_response = strings.Split(str_response, "var PageInfo = ")[1]
 	// Split on ;
@@ -114,6 +119,7 @@ func (s *Streamer) GetUID() {
 	// Set the SullyGnomeID
 	id := fmt.Sprintf("%.0f", j["id"])
 	s.SullyGnomeID = id
+	s.Name = user_response
 }
 
 // GetStats populates the Streamer struct's ThirtyDayStats field with 30-day streaming statistics.
