@@ -3,6 +3,9 @@ package streamers_test
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/infosecstreams/secinfo/streamers"
@@ -221,5 +224,75 @@ func TestReturnMarkdownLine(t *testing.T) {
 		s.ReturnMarkdownLine(true)
 		s.ReturnMarkdownLine(false)
 		fmt.Printf("Object: %+v", s)
+	}
+}
+
+func TestWriteCSVSortsByName(t *testing.T) {
+	list := streamers.StreamerList{Streamers: []streamers.Streamer{
+		{Name: "bob", YTURL: ""},
+		{Name: "Alice", YTURL: ""},
+		{Name: "charlie", YTURL: ""},
+	}}
+
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "streamers.csv")
+
+	if err := list.WriteCSV(filePath); err != nil {
+		t.Fatalf("WriteCSV failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	got := string(data)
+	want := "Alice,\nbob,\ncharlie,"
+	if got != want {
+		t.Fatalf("Got: %q, Wanted: %q", got, want)
+	}
+	if strings.HasSuffix(got, "\n") {
+		t.Fatalf("CSV should not end with a newline")
+	}
+}
+
+func TestAppendRemoveCSV(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "streamers.csv")
+	if err := os.WriteFile(filePath, []byte("bob,\ncharlie,"), 0644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	if err := streamers.AppendToCSV(filePath, streamers.Streamer{Name: "Alice"}); err != nil {
+		t.Fatalf("AppendToCSV failed: %v", err)
+	}
+	data, _ := os.ReadFile(filePath)
+	got := string(data)
+	want := "Alice,\nbob,\ncharlie,"
+	if got != want {
+		t.Fatalf("Got: %q, Wanted: %q", got, want)
+	}
+
+	if err := streamers.RemoveFromCSV(filePath, streamers.Streamer{Name: "bob"}); err != nil {
+		t.Fatalf("RemoveFromCSV failed: %v", err)
+	}
+	data, _ = os.ReadFile(filePath)
+	got = string(data)
+	want = "Alice,\ncharlie,"
+	if got != want {
+		t.Fatalf("Got: %q, Wanted: %q", got, want)
+	}
+}
+
+func TestContainsRemoveStreamer(t *testing.T) {
+	list := streamers.StreamerList{Streamers: []streamers.Streamer{
+		{Name: "Alice"},
+		{Name: "Bob"},
+	}}
+	if !list.ContainsStreamer(streamers.Streamer{Name: "alice"}) {
+		t.Fatalf("ContainsStreamer should match case-insensitively")
+	}
+	filtered := list.RemoveStreamer(streamers.Streamer{Name: "bob"})
+	if filtered.ContainsStreamer(streamers.Streamer{Name: "bob"}) {
+		t.Fatalf("RemoveStreamer should remove by name")
 	}
 }
