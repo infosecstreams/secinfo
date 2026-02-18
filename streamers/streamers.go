@@ -25,6 +25,7 @@ type Streamer struct {
 	SullyGnomeID   string  // The SullyGnome ID of the streamer
 	ThirtyDayStats float32 // Hours streamed in the last 30 days
 	Lang           string  // The streamer's language. If they are online this is used in the generated markdown.
+	WasInactive    bool    `json:"-"` // Whether the streamer came from inactive_streamers.csv
 }
 
 // StreamList is uhh... a list of Streamers.
@@ -50,6 +51,34 @@ func (sl StreamerList) Swap(i, j int) {
 // Implement sort, after implementing the Len, Less, and Swap functions to satisfy the sort.Interface.
 func (sl *StreamerList) Sort() {
 	sort.Sort(sl)
+}
+
+// SortByName sorts streamers by name case-insensitively for human-readable CSV output.
+func (sl *StreamerList) SortByName() {
+	sort.SliceStable(sl.Streamers, func(i, j int) bool {
+		return strings.ToLower(sl.Streamers[i].Name) < strings.ToLower(sl.Streamers[j].Name)
+	})
+}
+
+// ContainsStreamer returns true if a streamer with the same name exists in the list.
+func (sl StreamerList) ContainsStreamer(streamer Streamer) bool {
+	for _, s := range sl.Streamers {
+		if strings.EqualFold(s.Name, streamer.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+// RemoveStreamer returns a new list without the specified streamer (match by name).
+func (sl StreamerList) RemoveStreamer(streamer Streamer) StreamerList {
+	filtered := StreamerList{Streamers: make([]Streamer, 0, len(sl.Streamers))}
+	for _, s := range sl.Streamers {
+		if !strings.EqualFold(s.Name, streamer.Name) {
+			filtered.Streamers = append(filtered.Streamers, s)
+		}
+	}
+	return filtered
 }
 
 // SullyGnomeStats is a struct to deserialize the 30-day streaming statistics json response.
@@ -82,14 +111,16 @@ func (s *Streamer) GetUID() {
 	// Send the request
 	r, err := client.Do(request)
 	if err != nil {
-		fmt.Println(err)
+		log.Printf("Error fetching UID for %s: %s\n", s.Name, err)
+		return
 	}
 	defer r.Body.Close()
 
 	// Read the response
 	b, err := ioutil.ReadAll(r.Body)
 	if err != nil {
-		fmt.Println(err)
+		log.Printf("Error reading UID response for %s: %s\n", s.Name, err)
+		return
 	}
 
 	// Convert the response to a string
@@ -146,7 +177,8 @@ func (s *Streamer) GetStats() {
 	// Send the request
 	r, err := client.Do(request)
 	if err != nil {
-		fmt.Printf("Error sending request: %s\n", err)
+		log.Printf("Error sending stats request for %s: %s\n", s.Name, err)
+		return
 	}
 	defer r.Body.Close()
 
@@ -154,7 +186,8 @@ func (s *Streamer) GetStats() {
 	var sg SullyGnomeStats
 	err = json.NewDecoder(r.Body).Decode(&sg)
 	if err != nil {
-		fmt.Printf("Error decoding response: %s\n", err)
+		log.Printf("Error decoding stats response for %s: %s\n", s.Name, err)
+		return
 	}
 
 	// Sum up the 30 day stats by mutiplying each data by index+1.0
@@ -231,26 +264,111 @@ func ParseStreamers(f afero.File) (StreamerList, error) {
 		if err != nil {
 			return sl, err
 		}
-		// Check the file to see if they are a CSV file
-		for _, line := range strings.Split(string(b), "\n") {
-			// Trim the line
-			line = strings.TrimSpace(line)
-			// Skip empty lines
-			if line == "" {
-				continue
-			}
-			if !strings.Contains(line, ",") {
-				return sl, fmt.Errorf("file is not a CSV file: Text: %s", b)
-			}
-			parts := strings.Split(line, ",")
-			// Append the streamer to the list
-			sl.Streamers = append(sl.Streamers, Streamer{
-				Name:  parts[0],
-				YTURL: parts[1],
-			})
+		parsed, err := parseCSVData(string(b))
+		if err != nil {
+			return sl, err
 		}
+		sl = parsed
 	} else {
 		return sl, errors.New("file is not a file or is empty")
 	}
 	return sl, nil
+}
+
+// WriteCSV writes the streamer list to a CSV file sorted by name.
+func (sl StreamerList) WriteCSV(filePath string) error {
+	return sl.WriteCSVWithFS(afero.NewOsFs(), filePath)
+}
+
+// WriteCSVWithFS writes the streamer list to a CSV file sorted by name using the provided filesystem.
+func (sl StreamerList) WriteCSVWithFS(fileSystem afero.Fs, filePath string) error {
+	list := StreamerList{Streamers: append([]Streamer(nil), sl.Streamers...)}
+	list.SortByName()
+
+	content := buildCSVContent(list.Streamers)
+	return afero.WriteFile(fileSystem, filePath, []byte(content), 0644)
+}
+
+// AppendToCSV adds a streamer to a CSV file and keeps it sorted by name.
+func AppendToCSV(filePath string, streamer Streamer) error {
+	return AppendToCSVWithFS(afero.NewOsFs(), filePath, streamer)
+}
+
+// AppendToCSVWithFS adds a streamer to a CSV file and keeps it sorted by name using the provided filesystem.
+func AppendToCSVWithFS(fileSystem afero.Fs, filePath string, streamer Streamer) error {
+	list, err := readCSVFile(fileSystem, filePath)
+	if err != nil {
+		return err
+	}
+	if list.ContainsStreamer(streamer) {
+		return nil
+	}
+	list.Streamers = append(list.Streamers, streamer)
+	return list.WriteCSVWithFS(fileSystem, filePath)
+}
+
+// RemoveFromCSV removes a streamer from a CSV file and keeps it sorted by name.
+func RemoveFromCSV(filePath string, streamer Streamer) error {
+	return RemoveFromCSVWithFS(afero.NewOsFs(), filePath, streamer)
+}
+
+// RemoveFromCSVWithFS removes a streamer from a CSV file and keeps it sorted by name using the provided filesystem.
+func RemoveFromCSVWithFS(fileSystem afero.Fs, filePath string, streamer Streamer) error {
+	list, err := readCSVFile(fileSystem, filePath)
+	if err != nil {
+		return err
+	}
+	list = list.RemoveStreamer(streamer)
+	return list.WriteCSVWithFS(fileSystem, filePath)
+}
+
+func buildCSVContent(streamers []Streamer) string {
+	var builder strings.Builder
+	for _, s := range streamers {
+		name := strings.TrimSpace(s.Name)
+		if name == "" {
+			continue
+		}
+		if builder.Len() > 0 {
+			builder.WriteByte('\n')
+		}
+		builder.WriteString(name)
+		builder.WriteByte(',')
+		builder.WriteString(strings.TrimSpace(s.YTURL))
+	}
+	return builder.String()
+}
+
+func readCSVFile(fileSystem afero.Fs, filePath string) (StreamerList, error) {
+	list := StreamerList{}
+	data, err := afero.ReadFile(fileSystem, filePath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return list, nil
+		}
+		return list, err
+	}
+	if len(data) == 0 {
+		return list, nil
+	}
+	return parseCSVData(string(data))
+}
+
+func parseCSVData(data string) (StreamerList, error) {
+	list := StreamerList{}
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ",", 2)
+		if len(parts) < 2 {
+			return list, fmt.Errorf("file is not a CSV file: Text: %s", data)
+		}
+		list.Streamers = append(list.Streamers, Streamer{
+			Name:  parts[0],
+			YTURL: parts[1],
+		})
+	}
+	return list, nil
 }
