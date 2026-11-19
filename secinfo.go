@@ -104,11 +104,7 @@ func main() {
 	// Print line from the i indexMD
 	newMd := string(indexMdTemplate[:i])
 	for _, streamer := range active.Streamers {
-		s, err := streamer.ReturnMarkdownLine(streamer.OnlineNow(indexStr))
-		if err != nil {
-			fmt.Println(err)
-		}
-		newMd += s
+		newMd += activeRow(streamer, indexStr)
 	}
 	newMd += string(indexMdTemplate[i:])
 	// Write index.md
@@ -155,7 +151,7 @@ func fetchSullyGnome(s *streamers.Streamer) bool {
 
 // splitActive decides which streamers from streamers.csv stay active. A
 // streamer stays active if they streamed in the last 30 days, or if they
-// are live right now (🟢 in index.md). A streamer StreamStatus just moved
+// are live (🟢) or about to go live (🟡) in index.md. A streamer StreamStatus just moved
 // back from inactive because they went live has no recent SullyGnome
 // stats (or no SullyGnome ID) yet, and must not be demoted mid-stream.
 func splitActive(candidates []streamers.Streamer, indexText string, fetch func(*streamers.Streamer) bool) (active, inactive []streamers.Streamer) {
@@ -164,12 +160,39 @@ func splitActive(candidates []streamers.Streamer, indexText string, fetch func(*
 		switch {
 		case hasStats && streamer.ThirtyDayStats > 0:
 			active = append(active, streamer)
-		case streamer.OnlineNow(indexText):
-			fmt.Printf("keeping live streamer active despite no 30-day stats: %s\n", streamer.Name)
+		case hasLiveStatus(&streamer, indexText):
+			fmt.Printf("keeping live/pre-live streamer active despite no 30-day stats: %s\n", streamer.Name)
 			active = append(active, streamer)
 		default:
 			inactive = append(inactive, streamer)
 		}
 	}
 	return active, inactive
+}
+
+// hasLiveStatus reports whether the streamer's index.md row is 🟢 or 🟡.
+func hasLiveStatus(s *streamers.Streamer, indexText string) bool {
+	row, status := s.IndexRow(indexText)
+	if status == "" {
+		return false
+	}
+	// Rows end in "| <LANG>"; keep it for active.json as before.
+	if len(row) >= 2 {
+		s.Lang = row[len(row)-2:]
+	}
+	return true
+}
+
+// activeRow returns the streamer's index.md row. 🟢 and 🟡 rows are owned
+// by StreamStatus (they carry the stream's category, tags and pre-live
+// time), so they are kept verbatim; everything else is regenerated.
+func activeRow(s streamers.Streamer, indexText string) string {
+	if row, status := s.IndexRow(indexText); status != "" {
+		return row + "\n"
+	}
+	line, err := s.ReturnMarkdownLine(false)
+	if err != nil {
+		fmt.Println(err)
+	}
+	return line
 }

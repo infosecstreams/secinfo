@@ -335,3 +335,21 @@ func TestReturnMarkdownLineOnlineWithoutStats(t *testing.T) {
 		t.Errorf("offline with no stats: got %q, want an inactive row", got)
 	}
 }
+
+func TestIndexRowStatus(t *testing.T) {
+	index := strings.Join([]string{
+		"🟢 | `live` | x | EN",
+		"🟡 | `soon` | x | DE",
+		"&nbsp; | `idle` | x |",
+	}, "\n")
+	for name, want := range map[string]string{"live": streamers.StatusOnline, "SOON": streamers.StatusPrelive, "idle": "", "nobody": ""} {
+		s := streamers.Streamer{Name: name}
+		if _, got := s.IndexRow(index); got != want {
+			t.Errorf("%s: status %q, want %q", name, got, want)
+		}
+	}
+	soon := streamers.Streamer{Name: "soon"}
+	if soon.OnlineNow(index) {
+		t.Error("a 🟡 row is not online")
+	}
+}

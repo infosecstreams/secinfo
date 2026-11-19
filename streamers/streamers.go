@@ -198,25 +198,45 @@ func (s *Streamer) GetStats() {
 	s.ThirtyDayStats = sum
 }
 
-// OnlineNow returns a bool whether the streamer is online(🟢) or not in "index.md".
-func (s *Streamer) OnlineNow(indexText string) bool {
-	// Find the streamer's row by their exact backticked name (so "Garr"
-	// doesn't match "Garr_7") and check whether it is marked "🟢".
+// Row status markers StreamStatus writes in index.md's first column.
+const (
+	StatusOnline  = "🟢" // live now
+	StatusPrelive = "🟡" // offline, but just switched to an infosec category
+)
+
+// IndexRow finds the streamer's row in index.md by their exact backticked
+// name (so "Garr" doesn't match "Garr_7"), case-insensitively, and returns
+// it with its status marker (StatusOnline, StatusPrelive or "").
+func (s *Streamer) IndexRow(indexText string) (row, status string) {
 	name := "`" + strings.ToLower(s.Name) + "`"
 	for _, line := range strings.Split(indexText, "\n") {
 		line = strings.TrimRight(line, " \r")
 		if !strings.Contains(strings.ToLower(line), name) {
 			continue
 		}
-		if !strings.HasPrefix(strings.TrimSpace(line), "🟢") {
-			continue
+		trimmed := strings.TrimSpace(line)
+		for _, st := range []string{StatusOnline, StatusPrelive} {
+			if strings.HasPrefix(trimmed, st) {
+				return line, st
+			}
 		}
-		if len(line) >= 2 {
-			s.Lang = line[len(line)-2:]
+		if row == "" {
+			row = line
 		}
-		return true
 	}
-	return false
+	return row, ""
+}
+
+// OnlineNow returns a bool whether the streamer is online(🟢) or not in "index.md".
+func (s *Streamer) OnlineNow(indexText string) bool {
+	line, status := s.IndexRow(indexText)
+	if status != StatusOnline {
+		return false
+	}
+	if len(line) >= 2 {
+		s.Lang = line[len(line)-2:]
+	}
+	return true
 }
 
 // ReturnMarkdownLine returns a GitHub markdown-flavored line for 'index.md' or 'inactive.md'.

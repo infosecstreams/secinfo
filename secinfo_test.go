@@ -209,3 +209,39 @@ func names(list []streamers.Streamer) []string {
 	}
 	return out
 }
+
+// 🟢 and 🟡 rows belong to StreamStatus: the regen must keep them as they
+// are (category, tags, pre-live time) instead of rebuilding them.
+func TestMainKeepsLiveAndPreliveRowsVerbatim(t *testing.T) {
+	withTempDir(t, func(dir string) {
+		writeTemplates(t, dir)
+		live := "🟢 | `alpha` | [x](https://www.twitch.tv/alpha \"Just Chatting, Tags: infosec\") &nbsp; | EN"
+		prelive := "🟡 | `Garr_7` | [x](https://www.twitch.tv/Garr_7 \"Getting ready: Science & Technology (since 2026-11-19T14:05Z)\") &nbsp; | EN"
+		writeFile(t, filepath.Join(dir, "index.md"), strings.Join([]string{live, prelive, "&nbsp; | `bravo` | old row |"}, "\n")+"\n")
+		writeJSON(t, filepath.Join(dir, "active.json"), streamers.StreamerList{Streamers: []streamers.Streamer{
+			{Name: "alpha", ThirtyDayStats: 9}, {Name: "Garr_7", ThirtyDayStats: 1}, {Name: "bravo", ThirtyDayStats: 5},
+		}})
+		writeJSON(t, filepath.Join(dir, "inactive.json"), streamers.StreamerList{})
+		t.Setenv("SECINFO_TEST", "1")
+
+		main()
+
+		out := readFile(t, filepath.Join(dir, "index.md"))
+		for _, want := range []string{live + "\n", prelive + "\n", "&nbsp; | `bravo` | [<i class"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("index.md missing %q:\n%s", want, out)
+			}
+		}
+		// Still in 30-day order; status sorting happens in the browser.
+		assertOrder(t, out, []string{"`alpha`", "`bravo`", "`Garr_7`"})
+	})
+}
+
+func TestSplitActiveKeepsPreliveStreamers(t *testing.T) {
+	index := "🟡 | `soon` | [x](https://www.twitch.tv/soon \"Getting ready: Just Chatting (since 2026-11-19T14:05Z)\") &nbsp; | FR"
+	fetch := func(s *streamers.Streamer) bool { s.SullyGnomeID = "x"; return true }
+	active, inactive := splitActive([]streamers.Streamer{{Name: "soon"}}, index, fetch)
+	if len(active) != 1 || len(inactive) != 0 || active[0].Lang != "FR" {
+		t.Errorf("active=%+v inactive=%+v, want soon kept active with lang FR", active, inactive)
+	}
+}
