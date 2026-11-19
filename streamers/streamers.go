@@ -200,24 +200,32 @@ func (s *Streamer) GetStats() {
 
 // OnlineNow returns a bool whether the streamer is online(🟢) or not in "index.md".
 func (s *Streamer) OnlineNow(indexText string) bool {
-	// Read index.md and search for the streamer's name to see if the line contains "🟢"
+	// Find the streamer's row by their exact backticked name (so "Garr"
+	// doesn't match "Garr_7") and check whether it is marked "🟢".
+	name := "`" + strings.ToLower(s.Name) + "`"
 	for _, line := range strings.Split(indexText, "\n") {
-		if strings.Contains(line, s.Name) {
-			if strings.Contains(line, "🟢") {
-				s.Lang = line[len(line)-2:]
-				return true
-			}
+		line = strings.TrimRight(line, " \r")
+		if !strings.Contains(strings.ToLower(line), name) {
+			continue
 		}
+		if !strings.HasPrefix(strings.TrimSpace(line), "🟢") {
+			continue
+		}
+		if len(line) >= 2 {
+			s.Lang = line[len(line)-2:]
+		}
+		return true
 	}
 	return false
 }
 
 // ReturnMarkdownLine returns a GitHub markdown-flavored line for 'index.md' or 'inactive.md'.
-// If the stream has > 0 hours over 30 days, it will return a line that contains columns for the 🟢 and Twitch/YouTube links.
+// If the stream has > 0 hours over 30 days or is online, it will return a line that contains columns for the 🟢 and Twitch/YouTube links.
 // Otherwise if will return a line that just contains the streamer + links for inactive.md.
 func (s Streamer) ReturnMarkdownLine(online bool) (string, error) {
 	var line string
-	if s.ThirtyDayStats > 0 { // active streamer
+	// A live streamer is shown as active even with no 30-day stats yet.
+	if s.ThirtyDayStats > 0 || online { // active streamer
 		if online { // online
 			if s.YTURL != "" {
 				line = fmt.Sprintf("🟢 | `%s` | [<i class=\"fab fa-twitch\" style=\"color:#9146FF\"></i>](https://www.twitch.tv/%s) &nbsp; [<i class=\"fab fa-youtube\" style=\"color:#C00\"></i>](%s) | %s\n", s.Name, s.Name, s.YTURL, s.Lang)

@@ -146,3 +146,66 @@ func assertOrder(t *testing.T, content string, items []string) {
 		last = idx
 	}
 }
+
+// Garr_7 on 2026-11-05: StreamStatus moved them back to streamers.csv and
+// marked them 🟢 when they went live, then the regen demoted them because
+// SullyGnome had no 30-day stats for them yet.
+func TestSplitActiveKeepsLiveStreamers(t *testing.T) {
+	index := strings.Join([]string{
+		"🟢 | `Garr_7` | [x](https://www.twitch.tv/Garr_7) &nbsp; | EN",
+		"🟢 | `newbie` | [x](https://www.twitch.tv/newbie) &nbsp; | DE",
+		"&nbsp; | `idle` | [x](https://www.twitch.tv/idle) &nbsp; |",
+		"&nbsp; | `regular` | [x](https://www.twitch.tv/regular) &nbsp; |",
+	}, "\n")
+	stats := map[string]float32{"regular": 12}
+	fetch := func(s *streamers.Streamer) bool {
+		if s.Name == "newbie" || s.Name == "ghost" {
+			return false // no SullyGnome ID yet
+		}
+		s.SullyGnomeID = "id-" + s.Name
+		s.ThirtyDayStats = stats[s.Name]
+		return true
+	}
+	candidates := []streamers.Streamer{{Name: "Garr_7"}, {Name: "newbie"}, {Name: "idle"}, {Name: "regular"}, {Name: "ghost"}}
+
+	active, inactive := splitActive(candidates, index, fetch)
+
+	if got := names(active); strings.Join(got, ",") != "Garr_7,newbie,regular" {
+		t.Errorf("active = %v, want [Garr_7 newbie regular]", got)
+	}
+	if got := names(inactive); strings.Join(got, ",") != "idle,ghost" {
+		t.Errorf("inactive = %v, want [idle ghost]", got)
+	}
+	if active[0].Lang != "EN" || active[0].SullyGnomeID != "id-Garr_7" {
+		t.Errorf("Garr_7 lost fetched data: %+v", active[0])
+	}
+}
+
+// End to end through main(): a live 0-stat streamer is written to index.md
+// as an online row.
+func TestMainRendersLiveZeroStatStreamerOnline(t *testing.T) {
+	withTempDir(t, func(dir string) {
+		writeTemplates(t, dir)
+		writeFile(t, filepath.Join(dir, "index.md"), "🟢 | `Garr_7` | x | EN\n")
+		writeJSON(t, filepath.Join(dir, "active.json"), streamers.StreamerList{
+			Streamers: []streamers.Streamer{{Name: "Garr_7"}, {Name: "regular", ThirtyDayStats: 3}},
+		})
+		writeJSON(t, filepath.Join(dir, "inactive.json"), streamers.StreamerList{})
+		t.Setenv("SECINFO_TEST", "1")
+
+		main()
+
+		indexOut := readFile(t, filepath.Join(dir, "index.md"))
+		if !strings.Contains(indexOut, "🟢 | `Garr_7` |") {
+			t.Errorf("Garr_7 not rendered online:\n%s", indexOut)
+		}
+	})
+}
+
+func names(list []streamers.Streamer) []string {
+	out := make([]string, 0, len(list))
+	for _, s := range list {
+		out = append(out, s.Name)
+	}
+	return out
+}

@@ -296,3 +296,42 @@ func TestContainsRemoveStreamer(t *testing.T) {
 		t.Fatalf("RemoveStreamer should remove by name")
 	}
 }
+
+func TestOnlineNowMatchesExactName(t *testing.T) {
+	index := strings.Join([]string{
+		"---: | --- | :--- | :---",
+		"🟢 | `Garr_7` | [x](https://www.twitch.tv/Garr_7 \"Just Chatting\") &nbsp; | EN",
+		"&nbsp; | `Garr` | [x](https://www.twitch.tv/Garr) &nbsp; |",
+		"🟢 | `TheLaluka` | [x](https://www.twitch.tv/TheLaluka) &nbsp; | FR",
+	}, "\n")
+	tests := []struct {
+		name     string
+		want     bool
+		wantLang string
+	}{
+		{"Garr_7", true, "EN"},
+		{"Garr", false, ""}, // a substring of Garr_7 must not count
+		{"thelaluka", true, "FR"},
+		{"nobody", false, ""},
+	}
+	for _, tt := range tests {
+		s := streamers.Streamer{Name: tt.name}
+		if got := s.OnlineNow(index); got != tt.want || s.Lang != tt.wantLang {
+			t.Errorf("%s: OnlineNow = %v (lang %q), want %v (lang %q)", tt.name, got, s.Lang, tt.want, tt.wantLang)
+		}
+	}
+}
+
+// A live streamer with no 30-day stats yet must render as an active, online
+// row, not an inactive.md row.
+func TestReturnMarkdownLineOnlineWithoutStats(t *testing.T) {
+	s := streamers.Streamer{Name: "Garr_7", YTURL: "https://www.youtube.com/c/x", Lang: "EN"}
+	got, _ := s.ReturnMarkdownLine(true)
+	if !strings.HasPrefix(got, "🟢 | `Garr_7` |") || !strings.HasSuffix(got, "| EN\n") {
+		t.Errorf("got %q, want an online active row", got)
+	}
+	got, _ = s.ReturnMarkdownLine(false)
+	if !strings.HasPrefix(got, "`Garr_7` |") {
+		t.Errorf("offline with no stats: got %q, want an inactive row", got)
+	}
+}

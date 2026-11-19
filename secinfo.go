@@ -46,23 +46,8 @@ func main() {
 
 		// Only process active streamers from streamers.csv for stats
 		// Inactive streamers are kept as-is without checking stats
-		for _, streamer := range activeFromFile.Streamers {
-			// Populate the streamer struct with the data SullyGnome has
-			streamer.GetUID()
-			if streamer.SullyGnomeID == "" {
-				fmt.Printf("streamer has no SullyGnomeID: %s\n", streamer.Name)
-				inactive.Streamers = append(inactive.Streamers, streamer)
-				continue
-			}
-			streamer.GetStats()
-
-			// Append the streamer to the new streamerList
-			if streamer.ThirtyDayStats > 0 {
-				active.Streamers = append(active.Streamers, streamer)
-			} else {
-				inactive.Streamers = append(inactive.Streamers, streamer)
-			}
-		}
+		indexMd, _ := ioutil.ReadFile("index.md")
+		active.Streamers, inactive.Streamers = splitActive(activeFromFile.Streamers, string(indexMd), fetchSullyGnome)
 
 		// Add all inactive streamers to the inactive list WITHOUT checking stats
 		// (they remain inactive until manually moved back to streamers.csv)
@@ -154,4 +139,37 @@ func main() {
 	newMd += string(inactiveMD[i:])
 	// Write inactive.md
 	ioutil.WriteFile("./inactive.md", []byte(newMd), 0644)
+}
+
+// fetchSullyGnome populates the streamer with SullyGnome data. It reports
+// false if SullyGnome has no ID for the streamer.
+func fetchSullyGnome(s *streamers.Streamer) bool {
+	s.GetUID()
+	if s.SullyGnomeID == "" {
+		fmt.Printf("streamer has no SullyGnomeID: %s\n", s.Name)
+		return false
+	}
+	s.GetStats()
+	return true
+}
+
+// splitActive decides which streamers from streamers.csv stay active. A
+// streamer stays active if they streamed in the last 30 days, or if they
+// are live right now (🟢 in index.md). A streamer StreamStatus just moved
+// back from inactive because they went live has no recent SullyGnome
+// stats (or no SullyGnome ID) yet, and must not be demoted mid-stream.
+func splitActive(candidates []streamers.Streamer, indexText string, fetch func(*streamers.Streamer) bool) (active, inactive []streamers.Streamer) {
+	for _, streamer := range candidates {
+		hasStats := fetch(&streamer)
+		switch {
+		case hasStats && streamer.ThirtyDayStats > 0:
+			active = append(active, streamer)
+		case streamer.OnlineNow(indexText):
+			fmt.Printf("keeping live streamer active despite no 30-day stats: %s\n", streamer.Name)
+			active = append(active, streamer)
+		default:
+			inactive = append(inactive, streamer)
+		}
+	}
+	return active, inactive
 }
