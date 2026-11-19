@@ -1,3 +1,5 @@
+version: 2
+
 builds:
   - skip: true
   # Instead we build using the docker file and steps below.

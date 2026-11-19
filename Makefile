@@ -4,8 +4,8 @@ docs:
 	godoc -index -notes -play -timestamps -http 127.0.0.1:8000;
 
 test:
-	(go test -v -race -coverprofile=coverage.out ./...; \
-	go tool cover -html=coverage.out -o coverage.html)
+	go test -v -race -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
 
 cover: test
 
@@ -23,7 +23,7 @@ docker-build:
 	docker build -t secinfo-dev:${VERSION} .
 
 release:
-	goreleaser release --snapshot --rm-dist
+	goreleaser release --snapshot --clean
 
 docker-run:
 	docker run -it -v ${PWD}/templates:/app/templates -v ${PWD}/index.md:/app/index.md -v ${PWD}/inactive.md:/app/inactive.md -v ${PWD}/streamers.csv:/app/streamers.csv secinfo-dev:${VERSION}

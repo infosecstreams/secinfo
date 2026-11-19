@@ -2,172 +2,250 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"io/fs"
 	"os"
 	"strings"
 
 	"github.com/infosecstreams/secinfo/streamers"
-	"github.com/spf13/afero"
+)
+
+// Table headings in the templates; rows are inserted right after them.
+const (
+	indexHeading    = "---: | --- | :--- | :---\n"
+	inactiveHeading = "--: | ---\n"
 )
 
 func main() {
-	active := streamers.StreamerList{}
-	inactive := streamers.StreamerList{}
-
-	// Check environ SECINFO_TEST exists
-	if os.Getenv("SECINFO_TEST") == "" {
-		f, err := streamers.OpenCSV("streamers.csv")
-		if err != nil {
-			fmt.Printf("Error reading csv: %s\n", err)
-			os.Exit(1)
-		}
-		defer f.Close()
-
-		activeFromFile, err := streamers.ParseStreamers(f)
-		if err != nil {
-			fmt.Println(err)
-		}
-
-		inactiveFromFile := streamers.StreamerList{}
-		inactiveFile, err := streamers.OpenCSV("inactive_streamers.csv")
-		if err == nil {
-			defer inactiveFile.Close()
-			inactiveFromFile, err = streamers.ParseStreamers(inactiveFile)
-			if err != nil {
-				fmt.Println(err)
-			}
-			for i := range inactiveFromFile.Streamers {
-				inactiveFromFile.Streamers[i].WasInactive = true
-			}
-		} else if !os.IsNotExist(err) {
-			fmt.Printf("Error reading inactive csv: %s\n", err)
-		}
-
-		// Only process active streamers from streamers.csv for stats
-		// Inactive streamers are kept as-is without checking stats
-		indexMd, _ := ioutil.ReadFile("index.md")
-		active.Streamers, inactive.Streamers = splitActive(activeFromFile.Streamers, string(indexMd), fetchSullyGnome)
-
-		// Add all inactive streamers to the inactive list WITHOUT checking stats
-		// (they remain inactive until manually moved back to streamers.csv)
-		for _, streamer := range inactiveFromFile.Streamers {
-			inactive.Streamers = append(inactive.Streamers, streamer)
-		}
-	} else {
-		// Read test.json into active struct
-		f, _ := ioutil.ReadFile("active.json")
-		_ = json.Unmarshal([]byte(f), &active)
-
-		// Read inactive.json into inactive struct
-		f, _ = ioutil.ReadFile("inactive.json")
-		_ = json.Unmarshal([]byte(f), &inactive)
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "secinfo: %s\n", err)
+		os.Exit(1)
 	}
+}
 
-	// Call sort on the active streamer list
-	active.Sort()   // Sort active by ThirtyDayStats (descending)
-	inactive.Sort() // Sort inactive by ThirtyDayStats for JSON
+// run regenerates the streamer CSVs, JSON files and markdown pages. It
+// checks every input before writing anything, and fails rather than
+// writing a list that lost streamers because of bad input or an outage.
+func run() error {
+	test := os.Getenv("SECINFO_TEST") != ""
 
-	// Write the active struct to active.json if SECINFO_TEST is not set so latest data is available
-	if os.Getenv("SECINFO_TEST") == "" {
-		appFS := afero.NewOsFs()
-		j, _ := json.Marshal(active)
-		ioutil.WriteFile("active.json", j, 0644)
-
-		// write inactive.json
-		j, _ = json.Marshal(inactive)
-		ioutil.WriteFile("inactive.json", j, 0644)
-
-		// Write updated CSV files, sorted by name for human readability
-		activeCSVList := streamers.StreamerList{Streamers: active.Streamers}
-		if err := activeCSVList.WriteCSVWithFS(appFS, "streamers.csv"); err != nil {
-			fmt.Printf("Error writing streamers.csv: %s\n", err)
-			os.Exit(1)
-		}
-		inactiveCSVList := streamers.StreamerList{Streamers: inactive.Streamers}
-		if err := inactiveCSVList.WriteCSVWithFS(appFS, "inactive_streamers.csv"); err != nil {
-			fmt.Printf("Error writing inactive_streamers.csv: %s\n", err)
-			os.Exit(1)
-		}
+	indexMd, err := os.ReadFile("index.md")
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("reading index.md: %w", err)
 	}
-
-	// Markdown time!
-	// Read existing index.md into a string
-	indexMd, _ := ioutil.ReadFile("index.md")
 	indexStr := string(indexMd)
 
-	// Read index.tmpl.md into a string
-	indexMdTemplate, _ := ioutil.ReadFile("templates/index.tmpl.md")
-	// Find  '---: | --- | :--- | :---' and append each streamer in streamerist using ReturnMarkdownLine()
-	heading := "---: | --- | :--- | :---\n"
-	i := strings.Index(string(indexMdTemplate), heading) + len(heading)
-	// Print line from the i indexMD
-	newMd := string(indexMdTemplate[:i])
-	for _, streamer := range active.Streamers {
-		newMd += activeRow(streamer, indexStr)
+	indexTmpl, err := readTemplate("templates/index.tmpl.md", indexHeading)
+	if err != nil {
+		return err
 	}
-	newMd += string(indexMdTemplate[i:])
-	// Write index.md
-	ioutil.WriteFile("./index.md", []byte(newMd), 0644)
+	inactiveTmpl, err := readTemplate("templates/inactive.tmpl.md", inactiveHeading)
+	if err != nil {
+		return err
+	}
 
-	// Clear markdown string
-	newMd = ""
-	// Read inactive.tmpl.md into a string
-	inactiveMD, _ := ioutil.ReadFile("templates/inactive.tmpl.md")
-	// Fine '--: | --- | :--- | :---' and append each streamer in inactive using ReturnMarkdownLine()
-	heading = "--: | ---\n"
-	i = strings.Index(string(inactiveMD), heading) + len(heading)
-	// Print line to the i indexMD
-	newMd = string(inactiveMD[:i])
-
-	// Sort inactive streamers by name for alphabetical display in markdown
-	inactiveByName := streamers.StreamerList{Streamers: inactive.Streamers}
-	inactiveByName.SortByName()
-
-	for _, streamer := range inactiveByName.Streamers {
-		s, err := streamer.ReturnMarkdownLine(false) // Sorry inactive can't be online
+	active := streamers.StreamerList{}
+	inactive := streamers.StreamerList{}
+	if !test {
+		activeFromFile, err := readStreamers("streamers.csv", true)
 		if err != nil {
-			fmt.Println(err)
+			return err
 		}
-		newMd += s
+		inactiveFromFile, err := readStreamers("inactive_streamers.csv", false)
+		if err != nil {
+			return err
+		}
+		activeFromFile, inactiveFromFile = dedupe(activeFromFile, inactiveFromFile)
+		for i := range inactiveFromFile {
+			inactiveFromFile[i].WasInactive = true
+		}
+
+		// Only active streamers are checked against SullyGnome; inactive
+		// ones stay inactive until StreamStatus sees them go live.
+		var failed []string
+		active.Streamers, inactive.Streamers, failed = splitActive(activeFromFile, indexStr, fetchSullyGnome)
+		if tooManyFailures(len(failed), len(activeFromFile)) {
+			return fmt.Errorf("SullyGnome lookups failed for %d of %d streamers (%s); not writing anything",
+				len(failed), len(activeFromFile), strings.Join(failed, ", "))
+		}
+		inactive.Streamers = append(inactive.Streamers, inactiveFromFile...)
+	} else {
+		if err := readJSON("active.json", &active); err != nil {
+			return err
+		}
+		if err := readJSON("inactive.json", &inactive); err != nil {
+			return err
+		}
 	}
-	// Print line from the i indexMD
-	newMd += string(inactiveMD[i:])
-	// Write inactive.md
-	ioutil.WriteFile("./inactive.md", []byte(newMd), 0644)
+
+	active.Sort()   // by ThirtyDayStats, descending
+	inactive.Sort() // for the JSON file
+
+	// Build every output before writing any of them.
+	var b strings.Builder
+	b.WriteString(indexTmpl.before)
+	for _, streamer := range active.Streamers {
+		b.WriteString(activeRow(streamer, indexStr))
+	}
+	b.WriteString(indexTmpl.after)
+	newIndex := b.String()
+
+	inactiveByName := streamers.StreamerList{Streamers: append([]streamers.Streamer(nil), inactive.Streamers...)}
+	inactiveByName.SortByName()
+	b.Reset()
+	b.WriteString(inactiveTmpl.before)
+	for _, streamer := range inactiveByName.Streamers {
+		line, err := streamer.ReturnMarkdownLine(false) // inactive rows have no status
+		if err != nil {
+			return err
+		}
+		b.WriteString(line)
+	}
+	b.WriteString(inactiveTmpl.after)
+	newInactive := b.String()
+
+	if !test {
+		activeJSON, err := json.Marshal(active)
+		if err != nil {
+			return err
+		}
+		inactiveJSON, err := json.Marshal(inactive)
+		if err != nil {
+			return err
+		}
+		for _, w := range []struct {
+			path string
+			data []byte
+		}{{"active.json", activeJSON}, {"inactive.json", inactiveJSON}} {
+			if err := os.WriteFile(w.path, w.data, 0644); err != nil {
+				return fmt.Errorf("writing %s: %w", w.path, err)
+			}
+		}
+		// CSVs are written sorted by name for human readability.
+		if err := active.WriteCSV("streamers.csv"); err != nil {
+			return fmt.Errorf("writing streamers.csv: %w", err)
+		}
+		if err := inactive.WriteCSV("inactive_streamers.csv"); err != nil {
+			return fmt.Errorf("writing inactive_streamers.csv: %w", err)
+		}
+	}
+	if err := os.WriteFile("index.md", []byte(newIndex), 0644); err != nil {
+		return fmt.Errorf("writing index.md: %w", err)
+	}
+	if err := os.WriteFile("inactive.md", []byte(newInactive), 0644); err != nil {
+		return fmt.Errorf("writing inactive.md: %w", err)
+	}
+	return nil
 }
 
-// fetchSullyGnome populates the streamer with SullyGnome data. It reports
-// false if SullyGnome has no ID for the streamer.
-func fetchSullyGnome(s *streamers.Streamer) bool {
-	s.GetUID()
-	if s.SullyGnomeID == "" {
-		fmt.Printf("streamer has no SullyGnomeID: %s\n", s.Name)
-		return false
+// template is a page template split at its table heading.
+type template struct{ before, after string }
+
+func readTemplate(path, heading string) (template, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return template{}, fmt.Errorf("reading %s: %w", path, err)
 	}
-	s.GetStats()
-	return true
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	i := strings.Index(text, heading)
+	if i < 0 {
+		return template{}, fmt.Errorf("%s has no table heading %q", path, strings.TrimSpace(heading))
+	}
+	i += len(heading)
+	return template{before: text[:i], after: text[i:]}, nil
 }
 
-// splitActive decides which streamers from streamers.csv stay active. A
-// streamer stays active if they streamed in the last 30 days, or if they
-// are live (🟢) or about to go live (🟡) in index.md. A streamer StreamStatus just moved
-// back from inactive because they went live has no recent SullyGnome
-// stats (or no SullyGnome ID) yet, and must not be demoted mid-stream.
-func splitActive(candidates []streamers.Streamer, indexText string, fetch func(*streamers.Streamer) bool) (active, inactive []streamers.Streamer) {
+// readStreamers parses a streamers CSV. A malformed line fails the run
+// instead of silently dropping the whole list. A missing file is only an
+// error when required; an empty file is an empty list.
+func readStreamers(path string, required bool) ([]streamers.Streamer, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) && !required {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	list, err := streamers.ParseCSV(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return list.Streamers, nil
+}
+
+func readJSON(path string, v any) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, v)
+}
+
+// dedupe drops repeated names (case-insensitive) within and across the two
+// lists; the first active entry wins.
+func dedupe(active, inactive []streamers.Streamer) ([]streamers.Streamer, []streamers.Streamer) {
+	seen := map[string]bool{}
+	keep := func(list []streamers.Streamer) []streamers.Streamer {
+		var out []streamers.Streamer
+		for _, s := range list {
+			key := strings.ToLower(s.Name)
+			if seen[key] {
+				fmt.Printf("dropping duplicate streamer entry: %s\n", s.Name)
+				continue
+			}
+			seen[key] = true
+			out = append(out, s)
+		}
+		return out
+	}
+	a := keep(active)
+	return a, keep(inactive)
+}
+
+// tooManyFailures reports whether so many lookups failed that SullyGnome is
+// probably down or has changed; then nothing should be written.
+func tooManyFailures(failed, total int) bool {
+	return failed > 2 && failed*10 > total
+}
+
+// fetchSullyGnome looks the streamer up on SullyGnome and loads their
+// 30-day stats. It returns streamers.ErrNotFound if SullyGnome has no page
+// for them and another error if the lookup failed.
+func fetchSullyGnome(s *streamers.Streamer) error {
+	if err := s.GetUID(); err != nil {
+		return err
+	}
+	return s.GetStats()
+}
+
+// splitActive decides which streamers from streamers.csv stay active:
+//   - stats loaded: active if they streamed in the last 30 days
+//   - not on SullyGnome: inactive
+//   - lookup failed: kept active (nothing is known), and reported in failed
+//
+// Anyone 🟢 live or 🟡 about to go live in index.md stays active
+// regardless: a streamer StreamStatus just brought back has no recent
+// stats yet and must not be demoted mid-stream.
+func splitActive(candidates []streamers.Streamer, indexText string, fetch func(*streamers.Streamer) error) (active, inactive []streamers.Streamer, failed []string) {
 	for _, streamer := range candidates {
-		hasStats := fetch(&streamer)
+		err := fetch(&streamer)
 		switch {
-		case hasStats && streamer.ThirtyDayStats > 0:
+		case err == nil && streamer.ThirtyDayStats > 0:
 			active = append(active, streamer)
 		case hasLiveStatus(&streamer, indexText):
 			fmt.Printf("keeping live/pre-live streamer active despite no 30-day stats: %s\n", streamer.Name)
 			active = append(active, streamer)
-		default:
+		case err == nil, errors.Is(err, streamers.ErrNotFound):
+			fmt.Printf("moving %s to inactive (no streams in 30 days)\n", streamer.Name)
 			inactive = append(inactive, streamer)
+		default:
+			fmt.Printf("SullyGnome lookup failed for %s, keeping them active: %s\n", streamer.Name, err)
+			failed = append(failed, streamer.Name)
+			active = append(active, streamer)
 		}
 	}
-	return active, inactive
+	return active, inactive, failed
 }
 
 // hasLiveStatus reports whether the streamer's index.md row is 🟢 or 🟡.

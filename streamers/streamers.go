@@ -3,15 +3,19 @@
 package streamers
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"io/ioutil"
-	"log"
 	"net/http"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/afero"
 )
@@ -90,112 +94,141 @@ type SullyGnomeStats struct {
 	} `json:"data"`
 }
 
-// GetUID populates the Streamer struct's SullyGnomeID field.
-func (s *Streamer) GetUID() {
-	// Make a net/http get request to get the UID
-	// The URL is f'https://sullygnome.com/channel/%s/30/activitystats'
-	url := "https://sullygnome.com/channel/" + s.Name + "/30/activitystats"
+// SullyGnome access. BaseURL, HTTPClient, RetryDelays and Sleep are
+// variables so tests can point them at a fake server.
+var (
+	BaseURL     = "https://sullygnome.com"
+	HTTPClient  = &http.Client{Timeout: 30 * time.Second}
+	RetryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second}
+	Sleep       = time.Sleep
+)
 
-	// Create a new GET request
-	request, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		fmt.Println(err)
+// ErrNotFound means SullyGnome has no channel page for the streamer, which
+// happens when they haven't streamed for a long time (or the login is
+// wrong). It is the only fetch failure that justifies demoting someone.
+var ErrNotFound = errors.New("channel not found on SullyGnome")
+
+const userAgent = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:99.0) Gecko/20100101 Firefox/99.0"
+
+// validLogin matches Twitch login names.
+var validLogin = regexp.MustCompile(`^[A-Za-z0-9_]{1,25}$`)
+
+// get fetches url, retrying transport errors, 429s and 5xx responses. It
+// returns the body and the final URL after redirects.
+func get(url string) ([]byte, string, error) {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		body, final, retry, err := getOnce(url)
+		if err == nil {
+			return body, final, nil
+		}
+		lastErr = err
+		if !retry || attempt >= len(RetryDelays) {
+			return nil, "", lastErr
+		}
+		Sleep(RetryDelays[attempt])
 	}
-
-	// Set a User-Agent header
-	request.Header.Set("user-agent", "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:99.0) Gecko/20100101 Firefox/99.0")
-
-	// Create a new http client
-	client := &http.Client{}
-
-	// Send the request
-	r, err := client.Do(request)
-	if err != nil {
-		log.Printf("Error fetching UID for %s: %s\n", s.Name, err)
-		return
-	}
-	defer r.Body.Close()
-
-	// Read the response
-	b, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		log.Printf("Error reading UID response for %s: %s\n", s.Name, err)
-		return
-	}
-
-	// Convert the response to a string
-	str_response := string(b)
-
-	// Check if response contains username
-	if !strings.Contains(str_response, s.Name) {
-		log.Printf("streamer hasn't streamed in a while! username not found, check spelling: %s, check twitch: https://www.twitch.tv/%s/schedule, stats: %s\n", s.Name, s.Name, url)
-		return
-	}
-
-	// Parse the body for '<span class="PageHeaderMiddleWithImageHeaderP1">'
-	user_response := strings.Split(str_response, "<span class=\"PageHeaderMiddleWithImageHeaderP1\">")[1]
-	// Remove everything after '</span>'
-	user_response = strings.Split(user_response, "</span>")[0]
-	// Parse the body for 'var PageInfo = '
-	str_response = strings.Split(str_response, "var PageInfo = ")[1]
-	// Split on ;
-	str_response = strings.Split(str_response, ";")[0]
-	// Read the resulting string as json
-	var j map[string]interface{}
-	err = json.Unmarshal([]byte(str_response), &j)
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	// Set the SullyGnomeID
-	id := fmt.Sprintf("%.0f", j["id"])
-	s.SullyGnomeID = id
-	s.Name = user_response
 }
 
-// GetStats populates the Streamer struct's ThirtyDayStats field with 30-day streaming statistics.
-func (s *Streamer) GetStats() {
-	// Check that the streamer has a SullyGnomeID and not an empty string
+func getOnce(url string) (body []byte, final string, retry bool, err error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, "", false, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := HTTPClient.Do(req)
+	if err != nil {
+		return nil, "", true, err
+	}
+	defer resp.Body.Close()
+	body, err = io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return nil, "", true, err
+	}
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return nil, "", true, fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", false, fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
+	}
+	return body, resp.Request.URL.String(), false, nil
+}
+
+// pageInfo is the part of SullyGnome's `var PageInfo = {...}` we use.
+type pageInfo struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+func parsePageInfo(html []byte) (pageInfo, error) {
+	const marker = "var PageInfo = "
+	i := bytes.Index(html, []byte(marker))
+	if i < 0 {
+		return pageInfo{}, errors.New("no PageInfo on channel page")
+	}
+	var pi pageInfo
+	if err := json.NewDecoder(bytes.NewReader(html[i+len(marker):])).Decode(&pi); err != nil {
+		return pageInfo{}, fmt.Errorf("decoding PageInfo: %w", err)
+	}
+	return pi, nil
+}
+
+// GetUID looks the streamer up on SullyGnome and sets SullyGnomeID. It
+// returns ErrNotFound if SullyGnome has no page for them, and another error
+// if the lookup itself failed (network, rate limiting, page format change),
+// in which case nothing is known about the streamer.
+func (s *Streamer) GetUID() error {
+	if !validLogin.MatchString(s.Name) {
+		return fmt.Errorf("%q is not a valid Twitch login", s.Name)
+	}
+	body, final, err := get(BaseURL + "/channel/" + s.Name + "/30/activitystats")
+	if err != nil {
+		return err
+	}
+	// Unknown channels redirect to the homepage.
+	if !strings.Contains(final, "/channel/") {
+		return ErrNotFound
+	}
+	pi, err := parsePageInfo(body)
+	if err != nil {
+		return fmt.Errorf("%s: %w", s.Name, err)
+	}
+	if pi.ID <= 0 {
+		return ErrNotFound
+	}
+	s.SullyGnomeID = strconv.FormatInt(pi.ID, 10)
+	// Adopt SullyGnome's capitalisation of the display name, but never a
+	// different name (e.g. a localised display name).
+	if strings.EqualFold(pi.Name, s.Name) {
+		s.Name = pi.Name
+	}
+	return nil
+}
+
+// GetStats sets ThirtyDayStats from SullyGnome's 30-day hours chart. It
+// needs SullyGnomeID (see GetUID).
+func (s *Streamer) GetStats() error {
 	if s.SullyGnomeID == "" {
-		fmt.Printf("streamer has no SullyGnomeID: %s\n", s.Name)
-		return
+		return fmt.Errorf("%s: no SullyGnomeID", s.Name)
 	}
-
-	// Make a new GET request to get the stats
-	// The URL is f'https://sullygnome.com/api/charts/barcharts/getconfig/channelhourstreams/30/{uid}/{username}/%20/%20/0/0/%20/0/0/'
-	request, err := http.NewRequest("GET", "https://sullygnome.com/api/charts/barcharts/getconfig/channelhourstreams/30/"+s.SullyGnomeID+"/"+s.Name+"/%20/%20/0/0/%20/0/0/", nil)
+	body, _, err := get(BaseURL + "/api/charts/barcharts/getconfig/channelhourstreams/30/" + s.SullyGnomeID + "/" + s.Name + "/%20/%20/0/0/%20/0/0/")
 	if err != nil {
-		fmt.Printf("Error creating request: %s\n", err)
+		return err
 	}
-
-	// Set a User-Agent header
-	request.Header.Set("user-agent", "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:99.0) Gecko/20100101 Firefox/99.0")
-
-	// Create a new http client
-	client := &http.Client{}
-
-	// Send the request
-	r, err := client.Do(request)
-	if err != nil {
-		log.Printf("Error sending stats request for %s: %s\n", s.Name, err)
-		return
-	}
-	defer r.Body.Close()
-
-	// Parse the JSON response into SullyGnomeStats struct
 	var sg SullyGnomeStats
-	err = json.NewDecoder(r.Body).Decode(&sg)
-	if err != nil {
-		log.Printf("Error decoding stats response for %s: %s\n", s.Name, err)
-		return
+	if err := json.Unmarshal(body, &sg); err != nil {
+		return fmt.Errorf("%s: decoding stats: %w", s.Name, err)
 	}
-
-	// Sum up the 30 day stats by mutiplying each data by index+1.0
+	if len(sg.Data.Datasets) == 0 {
+		return fmt.Errorf("%s: stats response has no datasets", s.Name)
+	}
+	// Weight each bucket by its index (bucket i holds streams of ~i+1 hours).
 	var sum float32
 	for i, data := range sg.Data.Datasets[0].Data {
 		sum += data * float32(i+1)
 	}
 	s.ThirtyDayStats = sum
+	return nil
 }
 
 // Row status markers StreamStatus writes in index.md's first column.
@@ -281,10 +314,11 @@ func OpenCSV(file string) (afero.File, error) {
 
 // ParseStreamers takes an Afero file object and returns a StreamerList populated with Streamer objects.
 func ParseStreamers(f afero.File) (StreamerList, error) {
-	// Test if the file exists and is not a directory
-	i, _ := f.Stat()
-
 	var sl StreamerList
+	i, err := f.Stat()
+	if err != nil {
+		return sl, err
+	}
 	// Check if the file is a non-empty regular file
 	if !i.IsDir() && i.Size() > 0 {
 		// Read the file
@@ -382,6 +416,9 @@ func readCSVFile(fileSystem afero.Fs, filePath string) (StreamerList, error) {
 	return parseCSVData(string(data))
 }
 
+// ParseCSV parses "name,youtube-url" lines. Any malformed line is an error.
+func ParseCSV(data string) (StreamerList, error) { return parseCSVData(data) }
+
 func parseCSVData(data string) (StreamerList, error) {
 	list := StreamerList{}
 	for _, line := range strings.Split(data, "\n") {
@@ -391,11 +428,15 @@ func parseCSVData(data string) (StreamerList, error) {
 		}
 		parts := strings.SplitN(line, ",", 2)
 		if len(parts) < 2 {
-			return list, fmt.Errorf("file is not a CSV file: Text: %s", data)
+			return StreamerList{}, fmt.Errorf("line %q has no comma (want name,youtube-url)", line)
+		}
+		name := strings.TrimSpace(parts[0])
+		if !validLogin.MatchString(name) {
+			return StreamerList{}, fmt.Errorf("line %q: %q is not a valid Twitch login", line, name)
 		}
 		list.Streamers = append(list.Streamers, Streamer{
-			Name:  parts[0],
-			YTURL: parts[1],
+			Name:  name,
+			YTURL: strings.TrimSpace(parts[1]),
 		})
 	}
 	return list, nil

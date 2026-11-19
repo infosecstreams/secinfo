@@ -2,11 +2,15 @@ package streamers_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/infosecstreams/secinfo/streamers"
 	"github.com/spf13/afero"
@@ -96,8 +100,8 @@ func TestParseStreamersFail(t *testing.T) {
 	if err == nil {
 		t.Fatal("Error: test expected to fail!")
 	}
-	if err.Error() != "file is not a CSV file: Text: text\ntext2" {
-		t.Errorf("Got: %s, Wanted: %s", err, "file is not a CSV file: Text: text\ntext2")
+	if want := `line "text" has no comma (want name,youtube-url)`; err.Error() != want {
+		t.Errorf("Got: %s, Wanted: %s", err, want)
 	}
 	t.Logf("Received error as expected: %s", err)
 	sl = streamers.StreamerList{Streamers: []streamers.Streamer{}}
@@ -351,5 +355,109 @@ func TestIndexRowStatus(t *testing.T) {
 	soon := streamers.Streamer{Name: "soon"}
 	if soon.OnlineNow(index) {
 		t.Error("a 🟡 row is not online")
+	}
+}
+
+// fakeSully serves channel pages and stats like sullygnome.com.
+func fakeSully(t *testing.T, handler http.HandlerFunc) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	oldBase, oldSleep := streamers.BaseURL, streamers.Sleep
+	streamers.BaseURL, streamers.Sleep = srv.URL, func(time.Duration) {}
+	t.Cleanup(func() { streamers.BaseURL, streamers.Sleep = oldBase, oldSleep })
+}
+
+const channelPage = `<html><span class="PageHeaderMiddleWithImageHeaderP1">0xChance</span>
+<script>var PageInfo = {"dayranges":[{"Key":3,"Value":"3 days; ok"}],"urlpart":"0xchance","id":5484638,"name":"0xChance"};</script>`
+
+func TestGetUIDParsesPageInfoCaseInsensitively(t *testing.T) {
+	fakeSully(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(strings.ToLower(r.URL.Path), "/channel/0xchance") {
+			w.Write([]byte(channelPage))
+			return
+		}
+		http.NotFound(w, r)
+	})
+	s := streamers.Streamer{Name: "0XCHANCE"}
+	if err := s.GetUID(); err != nil {
+		t.Fatal(err)
+	}
+	if s.SullyGnomeID != "5484638" || s.Name != "0xChance" {
+		t.Errorf("got %+v", s)
+	}
+}
+
+func TestGetUIDUnknownChannelIsNotFound(t *testing.T) {
+	fakeSully(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.Redirect(w, r, "/", http.StatusFound) // what SullyGnome does
+			return
+		}
+		w.Write([]byte("<html>homepage mentioning nosuch somewhere</html>"))
+	})
+	s := streamers.Streamer{Name: "nosuch"}
+	if err := s.GetUID(); !errors.Is(err, streamers.ErrNotFound) {
+		t.Errorf("got %v, want ErrNotFound", err)
+	}
+}
+
+func TestGetUIDRetriesRateLimits(t *testing.T) {
+	calls := 0
+	fakeSully(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Write([]byte(channelPage))
+	})
+	s := streamers.Streamer{Name: "0xChance"}
+	if err := s.GetUID(); err != nil || calls != 3 {
+		t.Errorf("err=%v after %d calls, want success on the 3rd", err, calls)
+	}
+}
+
+// An outage must be an error, never "not found" (which would demote).
+func TestGetUIDOutageIsAnErrorNotNotFound(t *testing.T) {
+	for name, h := range map[string]http.HandlerFunc{
+		"503":            func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) },
+		"challenge page": func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("<html>Just a moment...</html>")) },
+		"bad PageInfo":   func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("var PageInfo = {broken")) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeSully(t, h)
+			s := streamers.Streamer{Name: "alice"}
+			err := s.GetUID()
+			if err == nil || errors.Is(err, streamers.ErrNotFound) {
+				t.Errorf("got %v, want a non-NotFound error", err)
+			}
+		})
+	}
+}
+
+func TestGetStatsAgainstFake(t *testing.T) {
+	body := `{"data":{"datasets":[{"data":[1,0,2]}]}}`
+	fakeSully(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) })
+	s := streamers.Streamer{Name: "alice", SullyGnomeID: "1"}
+	if err := s.GetStats(); err != nil || s.ThirtyDayStats != 7 {
+		t.Errorf("err=%v stats=%v, want 7 (1*1 + 2*3)", err, s.ThirtyDayStats)
+	}
+	body = `{}`
+	s.ThirtyDayStats = 0
+	if err := s.GetStats(); err == nil {
+		t.Error("want an error for a response without datasets, not 0 hours")
+	}
+}
+
+func TestParseCSVRejectsBadLines(t *testing.T) {
+	for _, in := range []string{"alice,\nbob\n", "al ice,\n", "ali\tce,x\n"} {
+		if _, err := streamers.ParseCSV(in); err == nil {
+			t.Errorf("ParseCSV(%q) succeeded, want an error", in)
+		}
+	}
+	got, err := streamers.ParseCSV(" alice , https://yt \n\nbob,\n")
+	if err != nil || len(got.Streamers) != 2 || got.Streamers[0].Name != "alice" || got.Streamers[0].YTURL != "https://yt" {
+		t.Errorf("got %+v, %v", got, err)
 	}
 }

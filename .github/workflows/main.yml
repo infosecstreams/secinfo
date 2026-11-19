@@ -3,9 +3,10 @@ name: Build secinfo Binary
 
 # Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the main branch
+  # Releases come only from tags: GoReleaser fails on an untagged commit, and
+  # building on both the main push and the tag push raced two identical
+  # image pushes.
   push:
-    branches: [main]
     tags: ["v*"]
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:

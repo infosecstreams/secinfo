@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,17 +159,20 @@ func TestSplitActiveKeepsLiveStreamers(t *testing.T) {
 		"&nbsp; | `regular` | [x](https://www.twitch.tv/regular) &nbsp; |",
 	}, "\n")
 	stats := map[string]float32{"regular": 12}
-	fetch := func(s *streamers.Streamer) bool {
+	fetch := func(s *streamers.Streamer) error {
 		if s.Name == "newbie" || s.Name == "ghost" {
-			return false // no SullyGnome ID yet
+			return streamers.ErrNotFound // no SullyGnome page yet
 		}
 		s.SullyGnomeID = "id-" + s.Name
 		s.ThirtyDayStats = stats[s.Name]
-		return true
+		return nil
 	}
 	candidates := []streamers.Streamer{{Name: "Garr_7"}, {Name: "newbie"}, {Name: "idle"}, {Name: "regular"}, {Name: "ghost"}}
 
-	active, inactive := splitActive(candidates, index, fetch)
+	active, inactive, failed := splitActive(candidates, index, fetch)
+	if len(failed) != 0 {
+		t.Errorf("failed = %v, want none", failed)
+	}
 
 	if got := names(active); strings.Join(got, ",") != "Garr_7,newbie,regular" {
 		t.Errorf("active = %v, want [Garr_7 newbie regular]", got)
@@ -239,9 +243,81 @@ func TestMainKeepsLiveAndPreliveRowsVerbatim(t *testing.T) {
 
 func TestSplitActiveKeepsPreliveStreamers(t *testing.T) {
 	index := "🟡 | `soon` | [x](https://www.twitch.tv/soon \"Getting ready: Just Chatting (since 2026-11-19T14:05Z)\") &nbsp; | FR"
-	fetch := func(s *streamers.Streamer) bool { s.SullyGnomeID = "x"; return true }
-	active, inactive := splitActive([]streamers.Streamer{{Name: "soon"}}, index, fetch)
+	fetch := func(s *streamers.Streamer) error { s.SullyGnomeID = "x"; return nil }
+	active, inactive, _ := splitActive([]streamers.Streamer{{Name: "soon"}}, index, fetch)
 	if len(active) != 1 || len(inactive) != 0 || active[0].Lang != "FR" {
 		t.Errorf("active=%+v inactive=%+v, want soon kept active with lang FR", active, inactive)
+	}
+}
+
+// A failed lookup (outage, rate limit, page change) must not demote anyone.
+func TestSplitActiveKeepsStreamersWhenLookupFails(t *testing.T) {
+	fetch := func(s *streamers.Streamer) error {
+		if s.Name == "flaky" {
+			return errors.New("HTTP 503")
+		}
+		return streamers.ErrNotFound
+	}
+	active, inactive, failed := splitActive([]streamers.Streamer{{Name: "flaky"}, {Name: "gone"}}, "", fetch)
+	if strings.Join(names(active), ",") != "flaky" || strings.Join(names(inactive), ",") != "gone" || strings.Join(failed, ",") != "flaky" {
+		t.Errorf("active=%v inactive=%v failed=%v; want flaky kept active and reported, gone demoted", names(active), names(inactive), failed)
+	}
+}
+
+func TestTooManyFailures(t *testing.T) {
+	for _, tt := range []struct {
+		failed, total int
+		want          bool
+	}{{0, 42, false}, {2, 10, false}, {3, 42, false}, {5, 42, true}, {42, 42, true}} {
+		if got := tooManyFailures(tt.failed, tt.total); got != tt.want {
+			t.Errorf("tooManyFailures(%d, %d) = %v, want %v", tt.failed, tt.total, got, tt.want)
+		}
+	}
+}
+
+// A malformed CSV line used to empty streamers.csv and exit 0.
+func TestRunRefusesMalformedCSV(t *testing.T) {
+	withTempDir(t, func(dir string) {
+		writeTemplates(t, dir)
+		writeFile(t, filepath.Join(dir, "index.md"), "x\n")
+		writeFile(t, filepath.Join(dir, "streamers.csv"), "alice,\nbob\ncarol,\n")
+		writeFile(t, filepath.Join(dir, "inactive_streamers.csv"), "dave,\n")
+		t.Setenv("SECINFO_TEST", "")
+
+		err := run()
+		if err == nil || !strings.Contains(err.Error(), "bob") {
+			t.Fatalf("run() = %v, want an error naming the bad line", err)
+		}
+		if got := readFile(t, filepath.Join(dir, "streamers.csv")); got != "alice,\nbob\ncarol,\n" {
+			t.Errorf("streamers.csv was rewritten: %q", got)
+		}
+	})
+}
+
+func TestRunRefusesTemplateWithoutHeading(t *testing.T) {
+	withTempDir(t, func(dir string) {
+		writeTemplates(t, dir)
+		writeFile(t, filepath.Join(dir, "templates", "index.tmpl.md"), "Header\nno table here\n")
+		writeFile(t, filepath.Join(dir, "index.md"), "keep me\n")
+		t.Setenv("SECINFO_TEST", "1")
+		writeJSON(t, filepath.Join(dir, "active.json"), streamers.StreamerList{})
+		writeJSON(t, filepath.Join(dir, "inactive.json"), streamers.StreamerList{})
+
+		if err := run(); err == nil {
+			t.Fatal("want an error for a template without the table heading")
+		}
+		if got := readFile(t, filepath.Join(dir, "index.md")); got != "keep me\n" {
+			t.Errorf("index.md was rewritten: %q", got)
+		}
+	})
+}
+
+func TestDedupe(t *testing.T) {
+	a, i := dedupe(
+		[]streamers.Streamer{{Name: "CybersecurityGrowth"}, {Name: "alice"}, {Name: "cybersecuritygrowth"}},
+		[]streamers.Streamer{{Name: "Alice"}, {Name: "bob"}},
+	)
+	if strings.Join(names(a), ",") != "CybersecurityGrowth,alice" || strings.Join(names(i), ",") != "bob" {
+		t.Errorf("active=%v inactive=%v", names(a), names(i))
 	}
 }
