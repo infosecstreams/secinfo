@@ -1,8 +1,6 @@
 package streamers_test
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -121,18 +119,6 @@ func TestSort(t *testing.T) {
 	sl.Sort()
 }
 
-func TestSullyGnomeStats(t *testing.T) {
-	// Set test json
-	j := "{\"data\": {\"datasets\": [{\"data\": [0,1,2,3,0,0,0,0,0]}]}}"
-
-	// Parse the JSON into sullyGnomeStats object
-	sg := streamers.SullyGnomeStats{}
-	err := json.Unmarshal([]byte(j), &sg)
-	if err != nil {
-		t.Errorf("%s", err)
-	}
-}
-
 func TestOpenCSVPass(t *testing.T) {
 	f, err := AFS.Open("streamers.csv")
 	if err != nil {
@@ -175,36 +161,6 @@ func TestOnlineNow(t *testing.T) {
 	}
 }
 
-func TestGetUserID(t *testing.T) {
-	f, _ := AFS.Open("streamers.csv")
-
-	// Parse the streamers.csv file
-	sl, err := streamers.ParseStreamers(f)
-	if err != nil {
-		t.Errorf("%s", err)
-	}
-	for _, s := range sl.Streamers {
-		s.GetUID()
-	}
-}
-
-func TestGetStats(t *testing.T) {
-	sl := streamers.StreamerList{
-		Streamers: []streamers.Streamer{
-			{Name: "fak3us3r", ThirtyDayStats: -1, SullyGnomeID: ""},
-			{Name: "0xBufu", YTURL: "", SullyGnomeID: "36324233", ThirtyDayStats: 0},
-			{Name: "0xCardinal", YTURL: "", SullyGnomeID: "41037834", ThirtyDayStats: 0},
-			{Name: "0xChance", YTURL: "", SullyGnomeID: "5484638", ThirtyDayStats: 0},
-			{Name: "0xRy4nG", YTURL: "https://www.youtube.com/channel/UCQWQlNq07_Rumy2i69dpqBw", SullyGnomeID: "6445036", ThirtyDayStats: 0},
-		},
-	}
-
-	for _, s := range sl.Streamers {
-		// s.GetUID()
-		s.GetStats()
-	}
-}
-
 func TestReturnMarkdownLine(t *testing.T) {
 	f, _ := AFS.Open("streamers.csv")
 
@@ -214,8 +170,6 @@ func TestReturnMarkdownLine(t *testing.T) {
 		t.Errorf("%s", err)
 	}
 	for _, s := range sl.Streamers {
-		s.GetUID()
-		s.GetStats()
 		if s.YTURL != "" && s.Name == "0xRy4nG" {
 			s.ThirtyDayStats = 0
 			s.ReturnMarkdownLine(true)
@@ -358,98 +312,6 @@ func TestIndexRowStatus(t *testing.T) {
 	}
 }
 
-// fakeSully serves channel pages and stats like sullygnome.com.
-func fakeSully(t *testing.T, handler http.HandlerFunc) {
-	t.Helper()
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
-	oldBase, oldSleep := streamers.BaseURL, streamers.Sleep
-	streamers.BaseURL, streamers.Sleep = srv.URL, func(time.Duration) {}
-	t.Cleanup(func() { streamers.BaseURL, streamers.Sleep = oldBase, oldSleep })
-}
-
-const channelPage = `<html><span class="PageHeaderMiddleWithImageHeaderP1">0xChance</span>
-<script>var PageInfo = {"dayranges":[{"Key":3,"Value":"3 days; ok"}],"urlpart":"0xchance","id":5484638,"name":"0xChance"};</script>`
-
-func TestGetUIDParsesPageInfoCaseInsensitively(t *testing.T) {
-	fakeSully(t, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(strings.ToLower(r.URL.Path), "/channel/0xchance") {
-			w.Write([]byte(channelPage))
-			return
-		}
-		http.NotFound(w, r)
-	})
-	s := streamers.Streamer{Name: "0XCHANCE"}
-	if err := s.GetUID(); err != nil {
-		t.Fatal(err)
-	}
-	if s.SullyGnomeID != "5484638" || s.Name != "0xChance" {
-		t.Errorf("got %+v", s)
-	}
-}
-
-func TestGetUIDUnknownChannelIsNotFound(t *testing.T) {
-	fakeSully(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.Redirect(w, r, "/", http.StatusFound) // what SullyGnome does
-			return
-		}
-		w.Write([]byte("<html>homepage mentioning nosuch somewhere</html>"))
-	})
-	s := streamers.Streamer{Name: "nosuch"}
-	if err := s.GetUID(); !errors.Is(err, streamers.ErrNotFound) {
-		t.Errorf("got %v, want ErrNotFound", err)
-	}
-}
-
-func TestGetUIDRetriesRateLimits(t *testing.T) {
-	calls := 0
-	fakeSully(t, func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if calls < 3 {
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		w.Write([]byte(channelPage))
-	})
-	s := streamers.Streamer{Name: "0xChance"}
-	if err := s.GetUID(); err != nil || calls != 3 {
-		t.Errorf("err=%v after %d calls, want success on the 3rd", err, calls)
-	}
-}
-
-// An outage must be an error, never "not found" (which would demote).
-func TestGetUIDOutageIsAnErrorNotNotFound(t *testing.T) {
-	for name, h := range map[string]http.HandlerFunc{
-		"503":            func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) },
-		"challenge page": func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("<html>Just a moment...</html>")) },
-		"bad PageInfo":   func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("var PageInfo = {broken")) },
-	} {
-		t.Run(name, func(t *testing.T) {
-			fakeSully(t, h)
-			s := streamers.Streamer{Name: "alice"}
-			err := s.GetUID()
-			if err == nil || errors.Is(err, streamers.ErrNotFound) {
-				t.Errorf("got %v, want a non-NotFound error", err)
-			}
-		})
-	}
-}
-
-func TestGetStatsAgainstFake(t *testing.T) {
-	body := `{"data":{"datasets":[{"data":[1,0,2]}]}}`
-	fakeSully(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(body)) })
-	s := streamers.Streamer{Name: "alice", SullyGnomeID: "1"}
-	if err := s.GetStats(); err != nil || s.ThirtyDayStats != 7 {
-		t.Errorf("err=%v stats=%v, want 7 (1*1 + 2*3)", err, s.ThirtyDayStats)
-	}
-	body = `{}`
-	s.ThirtyDayStats = 0
-	if err := s.GetStats(); err == nil {
-		t.Error("want an error for a response without datasets, not 0 hours")
-	}
-}
-
 func TestParseCSVRejectsBadLines(t *testing.T) {
 	for _, in := range []string{"alice,\nbob\n", "al ice,\n", "ali\tce,x\n"} {
 		if _, err := streamers.ParseCSV(in); err == nil {
@@ -459,5 +321,91 @@ func TestParseCSVRejectsBadLines(t *testing.T) {
 	got, err := streamers.ParseCSV(" alice , https://yt \n\nbob,\n")
 	if err != nil || len(got.Streamers) != 2 || got.Streamers[0].Name != "alice" || got.Streamers[0].YTURL != "https://yt" {
 		t.Errorf("got %+v, %v", got, err)
+	}
+}
+
+func fakeStats(t *testing.T, handler http.HandlerFunc) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	oldURL, oldSleep, oldNow := streamers.StatsURL, streamers.Sleep, streamers.Now
+	streamers.StatsURL, streamers.Sleep = srv.URL, func(time.Duration) {}
+	streamers.Now = func() time.Time { return time.Date(2026, 11, 21, 10, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { streamers.StatsURL, streamers.Sleep, streamers.Now = oldURL, oldSleep, oldNow })
+}
+
+const goodStats = `{"generated_at":"2026-11-21T09:55:04Z","streamers":[
+ {"id":"1191005071","login":"censoredhacker","display_name":"CensoredHacker","hours_30d":10.4,"streams_30d":7},
+ {"id":"54550064","login":"0reobyte","display_name":"0reoByte","hours_30d":0}]}`
+
+func TestLoadBotStats(t *testing.T) {
+	fakeStats(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(goodStats)) })
+	stats, err := streamers.LoadBotStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats) != 2 || stats["censoredhacker"].Hours30d != 10.4 || stats["0reobyte"].ID != "54550064" {
+		t.Errorf("got %+v", stats)
+	}
+
+	s := streamers.Streamer{Name: "censoredHacker"}
+	if !s.ApplyBotStats(stats) || s.ThirtyDayStats != 10.4 || s.Name != "CensoredHacker" || !s.Active() {
+		t.Errorf("ApplyBotStats: %+v", s)
+	}
+	o := streamers.Streamer{Name: "0reoByte", ThirtyDayStats: 99}
+	if !o.ApplyBotStats(stats) || o.ThirtyDayStats != 0 || o.Active() {
+		t.Errorf("0 hours must replace old stats and be inactive: %+v", o)
+	}
+	if n := (streamers.Streamer{Name: "nobody"}); n.ApplyBotStats(stats) {
+		t.Error("unknown login reported as known")
+	}
+}
+
+func TestLoadBotStatsRetriesThenSucceeds(t *testing.T) {
+	calls := 0
+	fakeStats(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable) // status.json is 503 until the first reconcile
+			return
+		}
+		w.Write([]byte(goodStats))
+	})
+	if _, err := streamers.LoadBotStats(); err != nil || calls != 3 {
+		t.Errorf("err=%v after %d calls, want success on the 3rd", err, calls)
+	}
+}
+
+// Anything that makes the data untrustworthy is an error, never "0 hours".
+func TestLoadBotStatsRejectsBadData(t *testing.T) {
+	for name, h := range map[string]http.HandlerFunc{
+		"outage":    func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) },
+		"not found": func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) },
+		"html":      func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("<html>Just a moment...</html>")) },
+		"no date": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"streamers":[{"id":"1","login":"a"}]}`))
+		},
+		"stale": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"generated_at":"2026-11-21T03:00:00Z","streamers":[{"id":"1","login":"a"}]}`))
+		},
+		"empty": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"generated_at":"2026-11-21T09:55:04Z","streamers":[]}`))
+		},
+		"bad login": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"generated_at":"2026-11-21T09:55:04Z","streamers":[{"id":"1","login":"a b"}]}`))
+		},
+		"no id": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"generated_at":"2026-11-21T09:55:04Z","streamers":[{"login":"a"}]}`))
+		},
+		"negative h": func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"generated_at":"2026-11-21T09:55:04Z","streamers":[{"id":"1","login":"a","hours_30d":-1}]}`))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeStats(t, h)
+			if stats, err := streamers.LoadBotStats(); err == nil {
+				t.Errorf("got %+v, want an error", stats)
+			}
+		})
 	}
 }

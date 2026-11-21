@@ -61,15 +61,19 @@ func run() error {
 			inactiveFromFile[i].WasInactive = true
 		}
 
-		// Only active streamers are checked against SullyGnome; inactive
-		// ones stay inactive until StreamStatus sees them go live.
-		var failed []string
-		active.Streamers, inactive.Streamers, failed = splitActive(activeFromFile, indexStr, fetchSullyGnome)
-		if tooManyFailures(len(failed), len(activeFromFile)) {
-			return fmt.Errorf("SullyGnome lookups failed for %d of %d streamers (%s); not writing anything",
-				len(failed), len(activeFromFile), strings.Join(failed, ", "))
+		// One rule for both lists, from StreamStatus's own data: see
+		// streamers.ActiveMinHours. No stats, no changes.
+		stats, err := streamers.LoadBotStats()
+		if err != nil {
+			return fmt.Errorf("loading StreamStatus stats: %w", err)
 		}
-		inactive.Streamers = append(inactive.Streamers, inactiveFromFile...)
+		candidates := append(activeFromFile, inactiveFromFile...)
+		var unknown []string
+		active.Streamers, inactive.Streamers, unknown = splitActive(candidates, indexStr, stats)
+		if tooManyFailures(len(unknown), len(candidates)) {
+			return fmt.Errorf("StreamStatus has no stats for %d of %d streamers (%s); not writing anything",
+				len(unknown), len(candidates), strings.Join(unknown, ", "))
+		}
 	} else {
 		if err := readJSON("active.json", &active); err != nil {
 			return err
@@ -203,49 +207,47 @@ func dedupe(active, inactive []streamers.Streamer) ([]streamers.Streamer, []stre
 	return a, keep(inactive)
 }
 
-// tooManyFailures reports whether so many lookups failed that SullyGnome is
-// probably down or has changed; then nothing should be written.
+// tooManyFailures reports whether so many streamers are missing from
+// StreamStatus's stats that its data is probably wrong; then nothing should
+// be written.
 func tooManyFailures(failed, total int) bool {
 	return failed > 2 && failed*10 > total
 }
 
-// fetchSullyGnome looks the streamer up on SullyGnome and loads their
-// 30-day stats. It returns streamers.ErrNotFound if SullyGnome has no page
-// for them and another error if the lookup failed.
-func fetchSullyGnome(s *streamers.Streamer) error {
-	if err := s.GetUID(); err != nil {
-		return err
-	}
-	return s.GetStats()
-}
-
-// splitActive decides which streamers from streamers.csv stay active:
-//   - stats loaded: active if they streamed in the last 30 days
-//   - not on SullyGnome: inactive
-//   - lookup failed: kept active (nothing is known), and reported in failed
-//
-// Anyone 🟢 live or 🟡 about to go live in index.md stays active
-// regardless: a streamer StreamStatus just brought back has no recent
-// stats yet and must not be demoted mid-stream.
-func splitActive(candidates []streamers.Streamer, indexText string, fetch func(*streamers.Streamer) error) (active, inactive []streamers.Streamer, failed []string) {
+// splitActive applies the roster rule to every streamer from both CSVs:
+//   - 🟢 live or 🟡 about to go live in index.md: active
+//   - StreamStatus has at least streamers.ActiveMinHours infosec hours for
+//     them in the last 30 days: active (inactive ones come back)
+//   - StreamStatus knows them with less: inactive
+//   - StreamStatus doesn't know them (e.g. a rename it hasn't seen yet):
+//     left on the list they were on, and reported in unknown
+func splitActive(candidates []streamers.Streamer, indexText string, stats map[string]streamers.BotStreamer) (active, inactive []streamers.Streamer, unknown []string) {
 	for _, streamer := range candidates {
-		err := fetch(&streamer)
+		known := streamer.ApplyBotStats(stats)
 		switch {
-		case err == nil && streamer.ThirtyDayStats > 0:
+		case known && streamer.Active():
+			if streamer.WasInactive {
+				fmt.Printf("moving %s back to active (%.1f infosec hours in 30 days)\n", streamer.Name, streamer.ThirtyDayStats)
+			}
 			active = append(active, streamer)
 		case hasLiveStatus(&streamer, indexText):
-			fmt.Printf("keeping live/pre-live streamer active despite no 30-day stats: %s\n", streamer.Name)
 			active = append(active, streamer)
-		case err == nil, errors.Is(err, streamers.ErrNotFound):
-			fmt.Printf("moving %s to inactive (no streams in 30 days)\n", streamer.Name)
+		case known:
+			if !streamer.WasInactive {
+				fmt.Printf("moving %s to inactive (%.1f infosec hours in 30 days)\n", streamer.Name, streamer.ThirtyDayStats)
+			}
 			inactive = append(inactive, streamer)
 		default:
-			fmt.Printf("SullyGnome lookup failed for %s, keeping them active: %s\n", streamer.Name, err)
-			failed = append(failed, streamer.Name)
-			active = append(active, streamer)
+			fmt.Printf("StreamStatus has no stats for %s; leaving them where they are\n", streamer.Name)
+			unknown = append(unknown, streamer.Name)
+			if streamer.WasInactive {
+				inactive = append(inactive, streamer)
+			} else {
+				active = append(active, streamer)
+			}
 		}
 	}
-	return active, inactive, failed
+	return active, inactive, unknown
 }
 
 // hasLiveStatus reports whether the streamer's index.md row is 🟢 or 🟡.

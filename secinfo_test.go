@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/infosecstreams/secinfo/streamers"
 )
@@ -148,9 +150,18 @@ func assertOrder(t *testing.T, content string, items []string) {
 	}
 }
 
+// botStats builds a stats.json lookup: login -> infosec hours in 30 days.
+func botStats(hours map[string]float32) map[string]streamers.BotStreamer {
+	out := map[string]streamers.BotStreamer{}
+	for login, h := range hours {
+		out[strings.ToLower(login)] = streamers.BotStreamer{ID: "id-" + login, Login: strings.ToLower(login), DisplayName: login, Hours30d: h}
+	}
+	return out
+}
+
 // Garr_7 on 2026-11-05: StreamStatus moved them back to streamers.csv and
 // marked them 🟢 when they went live, then the regen demoted them because
-// SullyGnome had no 30-day stats for them yet.
+// they had no 30-day stats yet.
 func TestSplitActiveKeepsLiveStreamers(t *testing.T) {
 	index := strings.Join([]string{
 		"🟢 | `Garr_7` | [x](https://www.twitch.tv/Garr_7) &nbsp; | EN",
@@ -158,30 +169,159 @@ func TestSplitActiveKeepsLiveStreamers(t *testing.T) {
 		"&nbsp; | `idle` | [x](https://www.twitch.tv/idle) &nbsp; |",
 		"&nbsp; | `regular` | [x](https://www.twitch.tv/regular) &nbsp; |",
 	}, "\n")
-	stats := map[string]float32{"regular": 12}
-	fetch := func(s *streamers.Streamer) error {
-		if s.Name == "newbie" || s.Name == "ghost" {
-			return streamers.ErrNotFound // no SullyGnome page yet
-		}
-		s.SullyGnomeID = "id-" + s.Name
-		s.ThirtyDayStats = stats[s.Name]
-		return nil
-	}
-	candidates := []streamers.Streamer{{Name: "Garr_7"}, {Name: "newbie"}, {Name: "idle"}, {Name: "regular"}, {Name: "ghost"}}
+	stats := botStats(map[string]float32{"Garr_7": 0, "newbie": 0, "idle": 0, "regular": 12})
+	candidates := []streamers.Streamer{{Name: "Garr_7"}, {Name: "newbie"}, {Name: "idle"}, {Name: "regular"}}
 
-	active, inactive, failed := splitActive(candidates, index, fetch)
-	if len(failed) != 0 {
-		t.Errorf("failed = %v, want none", failed)
+	active, inactive, unknown := splitActive(candidates, index, stats)
+	if len(unknown) != 0 {
+		t.Errorf("unknown = %v, want none", unknown)
 	}
-
 	if got := names(active); strings.Join(got, ",") != "Garr_7,newbie,regular" {
 		t.Errorf("active = %v, want [Garr_7 newbie regular]", got)
 	}
-	if got := names(inactive); strings.Join(got, ",") != "idle,ghost" {
-		t.Errorf("inactive = %v, want [idle ghost]", got)
+	if got := names(inactive); strings.Join(got, ",") != "idle" {
+		t.Errorf("inactive = %v, want [idle]", got)
 	}
-	if active[0].Lang != "EN" || active[0].SullyGnomeID != "id-Garr_7" {
-		t.Errorf("Garr_7 lost fetched data: %+v", active[0])
+	if active[0].Lang != "EN" {
+		t.Errorf("Garr_7 lost its language: %+v", active[0])
+	}
+}
+
+// censoredHacker on 2026-11-12/13: StreamStatus moved them back when they
+// went live, and every regen demoted them again minutes later because
+// SullyGnome hadn't counted the stream. With StreamStatus's own hours they
+// come back and stay, even if StreamStatus missed the live event.
+func TestSplitActiveBringsBackInactiveStreamersWithRecentHours(t *testing.T) {
+	stats := botStats(map[string]float32{"censoredHacker": 10.4, "dal3ksec": 17, "miloslavpalik": 0.3, "longgone": 0})
+	candidates := []streamers.Streamer{
+		{Name: "censoredhacker", WasInactive: true},
+		{Name: "dal3ksec", WasInactive: true},
+		{Name: "miloslavpalik", WasInactive: true},
+		{Name: "longgone", WasInactive: true},
+	}
+	active, inactive, unknown := splitActive(candidates, "", stats)
+	if got := strings.Join(names(active), ","); got != "censoredHacker,dal3ksec,miloslavpalik" {
+		t.Errorf("active = %s, want censoredHacker (display-name capitalisation), dal3ksec, miloslavpalik", got)
+	}
+	if got := strings.Join(names(inactive), ","); got != "longgone" || len(unknown) != 0 {
+		t.Errorf("inactive = %s unknown = %v, want longgone and none", got, unknown)
+	}
+	if active[0].ThirtyDayStats != 10.4 {
+		t.Errorf("hours = %v, want 10.4", active[0].ThirtyDayStats)
+	}
+}
+
+// HeckinSpectre on 2026-11-21: one stream, 6% infosec, so ~0 infosec hours.
+// They used to stay on the main list showing "0 h" because SullyGnome
+// counts every category.
+func TestSplitActiveDemotesBelowThreshold(t *testing.T) {
+	stats := botStats(map[string]float32{"HeckinSpectre": 0.04, "edge": streamers.ActiveMinHours})
+	active, inactive, _ := splitActive([]streamers.Streamer{{Name: "HeckinSpectre"}, {Name: "edge"}}, "", stats)
+	if strings.Join(names(active), ",") != "edge" || strings.Join(names(inactive), ",") != "HeckinSpectre" {
+		t.Errorf("active=%v inactive=%v; want edge (exactly %.1f h) active, HeckinSpectre inactive", names(active), names(inactive), streamers.ActiveMinHours)
+	}
+}
+
+func TestSplitActiveKeepsPreliveStreamers(t *testing.T) {
+	index := "🟡 | `soon` | [x](https://www.twitch.tv/soon \"Getting ready: Just Chatting (since 2026-11-19T14:05Z)\") &nbsp; | FR"
+	active, inactive, _ := splitActive([]streamers.Streamer{{Name: "soon"}}, index, botStats(map[string]float32{"soon": 0}))
+	if len(active) != 1 || len(inactive) != 0 || active[0].Lang != "FR" {
+		t.Errorf("active=%+v inactive=%+v, want soon kept active with lang FR", active, inactive)
+	}
+}
+
+// A streamer StreamStatus doesn't know (e.g. a rename it hasn't picked up)
+// stays on whichever list they were on.
+func TestSplitActiveLeavesUnknownStreamersInPlace(t *testing.T) {
+	candidates := []streamers.Streamer{{Name: "renamed"}, {Name: "oldname", WasInactive: true}}
+	active, inactive, unknown := splitActive(candidates, "", botStats(map[string]float32{"someoneelse": 3}))
+	if strings.Join(names(active), ",") != "renamed" || strings.Join(names(inactive), ",") != "oldname" || strings.Join(unknown, ",") != "renamed,oldname" {
+		t.Errorf("active=%v inactive=%v unknown=%v", names(active), names(inactive), unknown)
+	}
+}
+
+// fakeStats serves body as stats.json for run().
+func fakeStats(t *testing.T, status int, body string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	oldURL, oldSleep := streamers.StatsURL, streamers.Sleep
+	streamers.StatsURL, streamers.Sleep = srv.URL, func(time.Duration) {}
+	t.Cleanup(func() { streamers.StatsURL, streamers.Sleep = oldURL, oldSleep })
+}
+
+func statsJSON(hours map[string]float32) string {
+	type entry struct {
+		ID          string  `json:"id"`
+		Login       string  `json:"login"`
+		DisplayName string  `json:"display_name"`
+		Hours30d    float32 `json:"hours_30d"`
+	}
+	var list []entry
+	for login, h := range hours {
+		list = append(list, entry{"id-" + login, strings.ToLower(login), login, h})
+	}
+	b, _ := json.Marshal(map[string]any{"generated_at": time.Now().UTC().Format(time.RFC3339), "streamers": list})
+	return string(b)
+}
+
+// End to end: both CSVs are rewritten by the one rule.
+func TestRunMovesStreamersBothWays(t *testing.T) {
+	withTempDir(t, func(dir string) {
+		writeTemplates(t, dir)
+		writeFile(t, filepath.Join(dir, "index.md"), "x\n")
+		writeFile(t, filepath.Join(dir, "streamers.csv"), "regular,\nquiet,\n")
+		writeFile(t, filepath.Join(dir, "inactive_streamers.csv"), "back,\ngone,\n")
+		fakeStats(t, 200, statsJSON(map[string]float32{"regular": 5, "quiet": 0, "back": 2.4, "gone": 0}))
+		t.Setenv("SECINFO_TEST", "")
+
+		if err := run(); err != nil {
+			t.Fatal(err)
+		}
+		if got := readFile(t, filepath.Join(dir, "streamers.csv")); got != "back,\nregular," {
+			t.Errorf("streamers.csv = %q, want back and regular", got)
+		}
+		if got := readFile(t, filepath.Join(dir, "inactive_streamers.csv")); got != "gone,\nquiet," {
+			t.Errorf("inactive_streamers.csv = %q, want gone and quiet", got)
+		}
+		assertOrder(t, readFile(t, filepath.Join(dir, "index.md")), []string{"`regular`", "`back`"})
+	})
+}
+
+// No usable stats, no changes: an outage must never move anyone.
+func TestRunWritesNothingWithoutStats(t *testing.T) {
+	for name, tt := range map[string]struct {
+		status int
+		body   string
+	}{
+		"outage":       {503, "starting"},
+		"empty":        {200, `{"generated_at":"` + time.Now().UTC().Format(time.RFC3339) + `","streamers":[]}`},
+		"stale":        {200, `{"generated_at":"2020-01-01T00:00:00Z","streamers":[{"id":"1","login":"regular","hours_30d":5}]}`},
+		"most missing": {200, statsJSON(map[string]float32{"someoneelse": 1})},
+	} {
+		t.Run(name, func(t *testing.T) {
+			withTempDir(t, func(dir string) {
+				writeTemplates(t, dir)
+				writeFile(t, filepath.Join(dir, "index.md"), "keep\n")
+				writeFile(t, filepath.Join(dir, "streamers.csv"), "a,\nb,\nc,\nregular,\n")
+				writeFile(t, filepath.Join(dir, "inactive_streamers.csv"), "gone,\n")
+				fakeStats(t, tt.status, tt.body)
+				t.Setenv("SECINFO_TEST", "")
+
+				if err := run(); err == nil {
+					t.Fatal("run() succeeded, want an error")
+				}
+				if got := readFile(t, filepath.Join(dir, "streamers.csv")); got != "a,\nb,\nc,\nregular,\n" {
+					t.Errorf("streamers.csv was rewritten: %q", got)
+				}
+				if got := readFile(t, filepath.Join(dir, "index.md")); got != "keep\n" {
+					t.Errorf("index.md was rewritten: %q", got)
+				}
+			})
+		})
 	}
 }
 
@@ -239,29 +379,6 @@ func TestMainKeepsLiveAndPreliveRowsVerbatim(t *testing.T) {
 		// Still in 30-day order; status sorting happens in the browser.
 		assertOrder(t, out, []string{"`alpha`", "`bravo`", "`Garr_7`"})
 	})
-}
-
-func TestSplitActiveKeepsPreliveStreamers(t *testing.T) {
-	index := "🟡 | `soon` | [x](https://www.twitch.tv/soon \"Getting ready: Just Chatting (since 2026-11-19T14:05Z)\") &nbsp; | FR"
-	fetch := func(s *streamers.Streamer) error { s.SullyGnomeID = "x"; return nil }
-	active, inactive, _ := splitActive([]streamers.Streamer{{Name: "soon"}}, index, fetch)
-	if len(active) != 1 || len(inactive) != 0 || active[0].Lang != "FR" {
-		t.Errorf("active=%+v inactive=%+v, want soon kept active with lang FR", active, inactive)
-	}
-}
-
-// A failed lookup (outage, rate limit, page change) must not demote anyone.
-func TestSplitActiveKeepsStreamersWhenLookupFails(t *testing.T) {
-	fetch := func(s *streamers.Streamer) error {
-		if s.Name == "flaky" {
-			return errors.New("HTTP 503")
-		}
-		return streamers.ErrNotFound
-	}
-	active, inactive, failed := splitActive([]streamers.Streamer{{Name: "flaky"}, {Name: "gone"}}, "", fetch)
-	if strings.Join(names(active), ",") != "flaky" || strings.Join(names(inactive), ",") != "gone" || strings.Join(failed, ",") != "flaky" {
-		t.Errorf("active=%v inactive=%v failed=%v; want flaky kept active and reported, gone demoted", names(active), names(inactive), failed)
-	}
 }
 
 func TestTooManyFailures(t *testing.T) {

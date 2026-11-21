@@ -1,9 +1,8 @@
-/* Package streamers extracts 30-day streaming statistics and generates sorted markdown. */
+/* Package streamers loads StreamStatus's 30-day streaming statistics and generates sorted markdown. */
 // BUG(🐛): there are bugs in here.
 package streamers
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +12,6 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,13 +19,11 @@ import (
 )
 
 // Streamer is a struct that contains the name of a streamer and the YouTube channel url.
-// SullyGnomeID and ThirtyDayStats are fetched from SullyGnome.com.
-// (sorry for lightly gathering a small amount of info every 24 hours).
+// ThirtyDayStats comes from StreamStatus's stats.json (see LoadBotStats).
 type Streamer struct {
 	Name           string  // The name of the streamer
 	YTURL          string  // The url of the streamer's YouTube channel
-	SullyGnomeID   string  // The SullyGnome ID of the streamer
-	ThirtyDayStats float32 // Hours streamed in the last 30 days
+	ThirtyDayStats float32 // Hours streamed in infosec categories in the last 30 days
 	Lang           string  // The streamer's language. If they are online this is used in the generated markdown.
 	WasInactive    bool    `json:"-"` // Whether the streamer came from inactive_streamers.csv
 }
@@ -85,33 +81,95 @@ func (sl StreamerList) RemoveStreamer(streamer Streamer) StreamerList {
 	return filtered
 }
 
-// SullyGnomeStats is a struct to deserialize the 30-day streaming statistics json response.
-type SullyGnomeStats struct {
-	Data struct {
-		Datasets []struct {
-			Data []float32 `json:"data"`
-		} `json:"datasets"`
-	} `json:"data"`
-}
-
-// SullyGnome access. BaseURL, HTTPClient, RetryDelays and Sleep are
-// variables so tests can point them at a fake server.
+// StreamStatus's stats API. StatsURL, HTTPClient, RetryDelays, Sleep and
+// Now are variables so tests can point them at a fake server and clock.
 var (
-	BaseURL     = "https://sullygnome.com"
+	StatsURL    = "https://p.infosecstreams.com/streamstatus/stats.json"
 	HTTPClient  = &http.Client{Timeout: 30 * time.Second}
 	RetryDelays = []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second}
 	Sleep       = time.Sleep
+	Now         = time.Now
 )
 
-// ErrNotFound means SullyGnome has no channel page for the streamer, which
-// happens when they haven't streamed for a long time (or the login is
-// wrong). It is the only fetch failure that justifies demoting someone.
-var ErrNotFound = errors.New("channel not found on SullyGnome")
+// ActiveMinHours is the roster rule: a streamer stays on (or comes back to)
+// the main list with at least this many hours in infosec categories over
+// the last 30 days, as StreamStatus recorded them. It is the smallest value
+// the site shows, so nobody on the main list reads "0 h".
+const ActiveMinHours float32 = 0.1
 
-const userAgent = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:99.0) Gecko/20100101 Firefox/99.0"
+// MaxStatsAge is how old stats.json may be before it is too stale to move
+// anyone (StreamStatus regenerates it every few minutes).
+const MaxStatsAge = 6 * time.Hour
+
+const userAgent = "secinfo (+https://github.com/infosecstreams/secinfo)"
 
 // validLogin matches Twitch login names.
 var validLogin = regexp.MustCompile(`^[A-Za-z0-9_]{1,25}$`)
+
+// BotStreamer is one streamer in StreamStatus's stats.json. StreamStatus
+// tracks streamers by Twitch user ID; Login is their current login.
+type BotStreamer struct {
+	ID          string  `json:"id"`
+	Login       string  `json:"login"`
+	DisplayName string  `json:"display_name"`
+	Hours30d    float32 `json:"hours_30d"` // infosec categories only
+}
+
+type botStats struct {
+	GeneratedAt time.Time     `json:"generated_at"`
+	Streamers   []BotStreamer `json:"streamers"`
+}
+
+// LoadBotStats fetches StreamStatus's stats.json and returns its streamers
+// keyed by lower-case login. Anything that makes the data untrustworthy
+// (outage, stale or empty file, malformed entries) is an error, so the
+// caller writes nothing rather than moving streamers on bad data.
+func LoadBotStats() (map[string]BotStreamer, error) {
+	body, _, err := get(StatsURL)
+	if err != nil {
+		return nil, err
+	}
+	var st botStats
+	if err := json.Unmarshal(body, &st); err != nil {
+		return nil, fmt.Errorf("decoding %s: %w", StatsURL, err)
+	}
+	if st.GeneratedAt.IsZero() {
+		return nil, fmt.Errorf("%s has no generated_at", StatsURL)
+	}
+	if age := Now().Sub(st.GeneratedAt); age > MaxStatsAge {
+		return nil, fmt.Errorf("%s is stale: generated %s ago", StatsURL, age.Round(time.Minute))
+	}
+	if len(st.Streamers) == 0 {
+		return nil, fmt.Errorf("%s lists no streamers", StatsURL)
+	}
+	byLogin := make(map[string]BotStreamer, len(st.Streamers))
+	for _, b := range st.Streamers {
+		if !validLogin.MatchString(b.Login) || b.ID == "" || b.Hours30d < 0 {
+			return nil, fmt.Errorf("%s has a malformed entry: %+v", StatsURL, b)
+		}
+		byLogin[strings.ToLower(b.Login)] = b
+	}
+	return byLogin, nil
+}
+
+// ApplyBotStats sets ThirtyDayStats from the streamer's stats.json entry
+// and adopts its display-name capitalisation (never a different name). It
+// reports whether StreamStatus knows the streamer at all.
+func (s *Streamer) ApplyBotStats(stats map[string]BotStreamer) bool {
+	b, ok := stats[strings.ToLower(s.Name)]
+	if !ok {
+		return false
+	}
+	s.ThirtyDayStats = b.Hours30d
+	if strings.EqualFold(b.DisplayName, s.Name) {
+		s.Name = b.DisplayName
+	}
+	return true
+}
+
+// Active reports whether the streamer meets the roster rule (see
+// ActiveMinHours). Live and pre-live streamers are kept active separately.
+func (s Streamer) Active() bool { return s.ThirtyDayStats >= ActiveMinHours }
 
 // get fetches url, retrying transport errors, 429s and 5xx responses. It
 // returns the body and the final URL after redirects.
@@ -152,83 +210,6 @@ func getOnce(url string) (body []byte, final string, retry bool, err error) {
 		return nil, "", false, fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
 	}
 	return body, resp.Request.URL.String(), false, nil
-}
-
-// pageInfo is the part of SullyGnome's `var PageInfo = {...}` we use.
-type pageInfo struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
-}
-
-func parsePageInfo(html []byte) (pageInfo, error) {
-	const marker = "var PageInfo = "
-	i := bytes.Index(html, []byte(marker))
-	if i < 0 {
-		return pageInfo{}, errors.New("no PageInfo on channel page")
-	}
-	var pi pageInfo
-	if err := json.NewDecoder(bytes.NewReader(html[i+len(marker):])).Decode(&pi); err != nil {
-		return pageInfo{}, fmt.Errorf("decoding PageInfo: %w", err)
-	}
-	return pi, nil
-}
-
-// GetUID looks the streamer up on SullyGnome and sets SullyGnomeID. It
-// returns ErrNotFound if SullyGnome has no page for them, and another error
-// if the lookup itself failed (network, rate limiting, page format change),
-// in which case nothing is known about the streamer.
-func (s *Streamer) GetUID() error {
-	if !validLogin.MatchString(s.Name) {
-		return fmt.Errorf("%q is not a valid Twitch login", s.Name)
-	}
-	body, final, err := get(BaseURL + "/channel/" + s.Name + "/30/activitystats")
-	if err != nil {
-		return err
-	}
-	// Unknown channels redirect to the homepage.
-	if !strings.Contains(final, "/channel/") {
-		return ErrNotFound
-	}
-	pi, err := parsePageInfo(body)
-	if err != nil {
-		return fmt.Errorf("%s: %w", s.Name, err)
-	}
-	if pi.ID <= 0 {
-		return ErrNotFound
-	}
-	s.SullyGnomeID = strconv.FormatInt(pi.ID, 10)
-	// Adopt SullyGnome's capitalisation of the display name, but never a
-	// different name (e.g. a localised display name).
-	if strings.EqualFold(pi.Name, s.Name) {
-		s.Name = pi.Name
-	}
-	return nil
-}
-
-// GetStats sets ThirtyDayStats from SullyGnome's 30-day hours chart. It
-// needs SullyGnomeID (see GetUID).
-func (s *Streamer) GetStats() error {
-	if s.SullyGnomeID == "" {
-		return fmt.Errorf("%s: no SullyGnomeID", s.Name)
-	}
-	body, _, err := get(BaseURL + "/api/charts/barcharts/getconfig/channelhourstreams/30/" + s.SullyGnomeID + "/" + s.Name + "/%20/%20/0/0/%20/0/0/")
-	if err != nil {
-		return err
-	}
-	var sg SullyGnomeStats
-	if err := json.Unmarshal(body, &sg); err != nil {
-		return fmt.Errorf("%s: decoding stats: %w", s.Name, err)
-	}
-	if len(sg.Data.Datasets) == 0 {
-		return fmt.Errorf("%s: stats response has no datasets", s.Name)
-	}
-	// Weight each bucket by its index (bucket i holds streams of ~i+1 hours).
-	var sum float32
-	for i, data := range sg.Data.Datasets[0].Data {
-		sum += data * float32(i+1)
-	}
-	s.ThirtyDayStats = sum
-	return nil
 }
 
 // Row status markers StreamStatus writes in index.md's first column.
